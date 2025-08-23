@@ -1,0 +1,85 @@
+run_name: "Autoencoder training" 
+debug: False
+device: "cuda:0"
+path_to_mnist: "mnist.csv"
+image_size: [28, 28]
+random_state: 43
+epochs: 100
+log_every_n_steps: -1
+    
+batch_size: -0.34
+optimizers:
+  type: AdamW
+  parameters:
+    lr: 0.001
+
+autoencoder:
+  type: Sequential
+  layers:
+
+    - type: Sequential
+      layers:
+        - type: Conv2d
+          in_channels: 1
+          out_channels: 64
+          kernel_size: [4, 4]
+          stride: [2, 2]
+          padding: [1, 1]
+        - type: ReLU
+        - type: Conv2d
+          in_channels: 64
+          out_channels: 128
+          kernel_size: [4, 4]
+          stride: [2, 2]
+          padding: [1, 1]
+        - type: ReLU
+        - type: BatchNorm2d
+          num_features: 128
+        - type: Flatten
+        - type: Linear
+          in_features: 6272
+          out_features: 1024
+          bias: True
+        - type: BatchNorm1d
+          num_features: 1024
+        - type: ReLU
+        - type: Linear
+          in_features: 1024
+          out_features: 20
+          bias: True
+        - type: Tanh
+
+    - type: Sequential
+      layers:
+        - type: Linear
+          in_features: 20
+          out_features: 1024
+          bias: True
+        - type: BatchNorm1d
+          num_features: 1024
+        - type: ReLU
+        - type: Linear
+          in_features: 1024
+          out_features: 6272
+          bias: True
+        - type: Reshape
+          shape: [128, 7, 7]
+        - type: BatchNorm2d
+          num_features: 128
+        - type: ReLU
+        - type: ConvTranspose2d
+          in_channels: 128
+          out_channels: 64
+          kernel_size: [4, 4]
+          stride: [2, 2]
+          padding: [1, 1]
+        - type: BatchNorm2d
+          num_features: 64
+        - type: ReLU
+        - type: ConvTranspose2d
+          in_channels: 64
+          out_channels: 1
+          kernel_size: [4, 4]
+          stride: [2, 2]
+          padding: [1, 1]
+        - type: Sigmoid
