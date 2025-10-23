@@ -13,6 +13,7 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from torch import Tensor, autograd
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 __all__ = [
     "DCGenerator",
@@ -48,6 +49,93 @@ def _zero_dim_noise(noise: Tensor) -> Tensor:
     if noise.dim() <= 2:
         return noise
     return noise.view(noise.size(0), -1)
+
+
+def _single_class_loader(
+    train_loader: Iterable[Tuple[Tensor, Tensor]],
+    label_target: int,
+) -> DataLoader:
+    """Return a ``DataLoader`` that only yields samples from ``label_target``.
+
+    ``train_gan_for_class`` originally filtered the batches on the fly.  When the
+    target class is the minority, this leads to tiny batch sizes (often of size
+    one), making the batch-normalisation layers inside the generators unstable
+    and hurting convergence.  Preparing a dedicated loader up-front gives us
+    consistently sized batches and matches the behaviour from the original
+    notebook where each class had its own loader.
+    """
+
+    base_batch_size = getattr(train_loader, "batch_size", None)
+    if base_batch_size is None or base_batch_size <= 0:
+        base_batch_size = getattr(train_loader, "_batch_size", None)
+    if base_batch_size is None or base_batch_size <= 0:
+        base_batch_size = 64
+
+    dataset = getattr(train_loader, "dataset", None)
+    indices: Optional[List[int]] = None
+
+    loader_kwargs = {
+        "num_workers": getattr(train_loader, "num_workers", 0),
+        "pin_memory": getattr(train_loader, "pin_memory", False),
+    }
+    if loader_kwargs["num_workers"] > 0 and hasattr(train_loader, "persistent_workers"):
+        loader_kwargs["persistent_workers"] = getattr(
+            train_loader, "persistent_workers", False
+        )
+    generator = getattr(train_loader, "generator", None)
+    if generator is not None:
+        loader_kwargs["generator"] = generator
+
+    if dataset is not None:
+        labels_attr = None
+        for attr in ("targets", "labels", "y"):
+            if hasattr(dataset, attr):
+                labels_attr = getattr(dataset, attr)
+                break
+
+        if labels_attr is not None:
+            labels_tensor = torch.as_tensor(labels_attr)
+            if labels_tensor.dim() > 1:
+                labels_tensor = labels_tensor.squeeze()
+            indices_tensor = (labels_tensor == label_target).nonzero(as_tuple=False).view(-1)
+            if indices_tensor.numel() > 0:
+                indices = indices_tensor.tolist()
+
+    if indices:
+        subset = Subset(dataset, indices)
+        batch_size = min(base_batch_size, len(indices))
+        drop_last = len(indices) >= 2 and len(indices) % batch_size == 1
+        return DataLoader(
+            subset,
+            batch_size=batch_size,
+            shuffle=True,
+            drop_last=drop_last,
+            **loader_kwargs,
+        )
+
+    class_images: List[Tensor] = []
+    for imgs, labels in train_loader:
+        mask = labels.squeeze() == label_target
+        if mask.any():
+            class_images.append(imgs[mask])
+
+    if not class_images:
+        raise ValueError(
+            f"Nenhuma amostra da classe {label_target} encontrada no train_loader."
+        )
+
+    images = torch.cat(class_images, dim=0)
+    labels_tensor = torch.full((images.size(0), 1), label_target, dtype=torch.long)
+    dataset = TensorDataset(images, labels_tensor)
+    batch_size = min(base_batch_size, len(dataset))
+    drop_last = len(dataset) >= 2 and len(dataset) % batch_size == 1
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=drop_last,
+        **loader_kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +338,7 @@ def train_gan_for_class(
     """Train a DCGAN for a specific target class and return the generator."""
 
     device = _resolve_device(device)
+    data_loader = _single_class_loader(train_loader, label_target)
     criterion = nn.BCELoss()
     optim_G = torch.optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
     optim_D = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
@@ -262,12 +351,8 @@ def train_gan_for_class(
         epoch_loss_G = 0.0
         batches_processed = 0
 
-        for imgs, labels in train_loader:
-            mask = labels.squeeze() == label_target
-            if mask.sum() == 0:
-                continue
-
-            real = imgs[mask].to(device)
+        for real, _ in data_loader:
+            real = real.to(device)
             batch_size = real.size(0)
             noise = torch.randn(batch_size, latent_dim, 1, 1, device=device)
 
@@ -316,6 +401,7 @@ def train_gan_for_class_with_loss(
     """Train a DCGAN while tracking discriminator and generator losses."""
 
     device = _resolve_device(device)
+    data_loader = _single_class_loader(train_loader, label_target)
     criterion = nn.BCELoss()
     optim_G = torch.optim.Adam(G.parameters(), lr=2e-4, betas=(0.5, 0.999))
     optim_D = torch.optim.Adam(D.parameters(), lr=2e-4, betas=(0.5, 0.999))
@@ -331,12 +417,8 @@ def train_gan_for_class_with_loss(
         epoch_loss_G = 0.0
         batches = 0
 
-        for imgs, labels in train_loader:
-            mask = labels.squeeze() == label_target
-            if mask.sum() == 0:
-                continue
-
-            real = imgs[mask].to(device)
+        for real, _ in data_loader:
+            real = real.to(device)
             batch_size = real.size(0)
             noise = torch.randn(batch_size, latent_dim, 1, 1, device=device)
 
@@ -394,16 +476,20 @@ def train_cgan(
     G.train()
     D.train()
 
+    data_loader = (
+        _single_class_loader(train_loader, label_target)
+        if label_target is not None
+        else train_loader
+    )
+
     for epoch in range(num_epochs):
-        for imgs, labels in train_loader:
+        for imgs, labels in data_loader:
+            real = imgs.to(device)
             if label_target is not None:
-                mask = labels.squeeze() == label_target
-                if mask.sum() == 0:
-                    continue
-                real = imgs[mask].to(device)
-                labels_real = labels[mask].squeeze().long().to(device)
+                labels_real = torch.full(
+                    (real.size(0),), label_target, device=device, dtype=torch.long
+                )
             else:
-                real = imgs.to(device)
                 labels_real = labels.squeeze().long().to(device)
 
             batch_size = real.size(0)
@@ -455,15 +541,15 @@ def train_wgangp(
     G.train()
     D.train()
 
+    data_loader = (
+        _single_class_loader(train_loader, label_target)
+        if label_target is not None
+        else train_loader
+    )
+
     for epoch in range(num_epochs):
-        for imgs, labels in train_loader:
-            if label_target is not None:
-                mask = labels.squeeze() == label_target
-                if mask.sum() == 0:
-                    continue
-                real = imgs[mask].to(device)
-            else:
-                real = imgs.to(device)
+        for imgs, _ in data_loader:
+            real = imgs.to(device)
 
             batch_size = real.size(0)
             if batch_size == 0:
