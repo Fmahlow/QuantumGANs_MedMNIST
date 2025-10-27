@@ -1,0 +1,18 @@
+{
+  "data_flag": "breastmnist",
+  "latent_dim": 100,
+  "gan_epochs": 5,
+  "classifier_epochs": 1,
+  "num_gan_runs": 1,
+  "num_generation_runs": 1,
+  "num_classifier_runs": 1,
+  "classifier_batch_size": 64,
+  "data_batch_size": 128,
+  "device": "cpu",
+  "base_seed": 2024,
+  "real_class0_count": 147,
+  "real_class1_count": 399,
+  "synthetic_needed_for_balance": 252,
+  "total_real_samples": 546,
+  "timestamp": "2025-10-27T16:44:48Z"
+}
