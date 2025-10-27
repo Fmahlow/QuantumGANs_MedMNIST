@@ -15,10 +15,13 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
+from sklearn.decomposition import PCA
 from torch import nn
 import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, random_split
 from torchvision.models import resnet18
+
+import numpy as np
 
 
 __all__ = [
@@ -29,6 +32,12 @@ __all__ = [
     "upscale_to_28",
     "SyntheticDataset",
     "run_experiments",
+    "MosaiqDiscriminator",
+    "MosaiqQuantumGenerator",
+    "train_mosaiq_gan",
+    "scale_data",
+    "prepare_mosaiq_pca_data",
+    "create_mosaiq_pca_loaders",
 ]
 
 
@@ -421,3 +430,309 @@ def run_experiments(
     )
 
     return pd.DataFrame(results)
+
+
+def scale_data(
+    data: np.ndarray,
+    scale: Sequence[float] = (-1.0, 1.0),
+    *,
+    dtype: np.dtype | type = np.float32,
+) -> np.ndarray:
+    """Scale the input array to the provided range.
+
+    Parameters
+    ----------
+    data:
+        Array containing the values to be scaled.
+    scale:
+        Two-element sequence with the minimum and maximum of the desired range.
+    dtype:
+        Target dtype of the returned array.
+    """
+
+    if len(scale) != 2:
+        raise ValueError("scale must contain exactly two elements: (min, max)")
+
+    arr = np.asarray(data, dtype=np.float64)
+    if arr.size == 0:
+        return arr.astype(dtype)
+
+    mn, mx = float(arr.min()), float(arr.max())
+    a, b = float(scale[0]), float(scale[1])
+
+    if np.isclose(mx, mn):
+        return np.full_like(arr, (a + b) / 2.0, dtype=dtype)
+
+    scaled = (arr - mn) / (mx - mn)
+    scaled = scaled * (b - a) + a
+    return scaled.astype(dtype)
+
+
+def _extract_dataset_images(dataset) -> torch.Tensor:
+    if hasattr(dataset, "imgs"):
+        base_imgs = dataset.imgs
+    elif hasattr(dataset, "data"):
+        base_imgs = dataset.data
+    else:
+        raise AttributeError("Dataset must expose an 'imgs' or 'data' attribute with the images")
+
+    if isinstance(base_imgs, torch.Tensor):
+        imgs_tensor = base_imgs.clone().float()
+    else:
+        imgs_tensor = torch.as_tensor(base_imgs).float()
+
+    if imgs_tensor.ndim == 4 and imgs_tensor.shape[-1] == 1:
+        imgs_tensor = imgs_tensor.permute(0, 3, 1, 2)
+    elif imgs_tensor.ndim == 3:
+        imgs_tensor = imgs_tensor.unsqueeze(1)
+
+    if imgs_tensor.max() > 1:
+        imgs_tensor = imgs_tensor / 255.0
+
+    return imgs_tensor
+
+
+def prepare_mosaiq_pca_data(
+    dataset,
+    *,
+    target_size: int = 8,
+    pca_components: int = 40,
+) -> Tuple[torch.Tensor, torch.Tensor, PCA]:
+    """Return PCA-compressed tensors for the MOSAIQ GAN pipeline.
+
+    The dataset is resized to ``target_size`` before being flattened and compressed
+    with Principal Component Analysis. The resulting tensor is already scaled to
+    ``[-1, 1]`` so it can be directly consumed by the MOSAIQ discriminator.
+    """
+
+    imgs_tensor = _extract_dataset_images(dataset)
+    lowres_tensor = F.interpolate(
+        imgs_tensor, size=(target_size, target_size), mode="bilinear", align_corners=False
+    )
+
+    flat_imgs = lowres_tensor.reshape(lowres_tensor.size(0), -1).cpu().numpy()
+    scaled_inputs = scale_data(flat_imgs, (0.0, 1.0))
+
+    pca = PCA(n_components=pca_components)
+    pca_data = pca.fit_transform(scaled_inputs)
+    scaled_pca = scale_data(pca_data)
+    tensor_pca = torch.from_numpy(scaled_pca).float()
+
+    if hasattr(dataset, "labels"):
+        labels = torch.as_tensor(dataset.labels).view(-1)
+    elif hasattr(dataset, "targets"):
+        labels = torch.as_tensor(dataset.targets).view(-1)
+    else:
+        raise AttributeError("Dataset must expose 'labels' or 'targets' with the class ids")
+
+    labels = labels.to(torch.long)
+    return tensor_pca, labels, pca
+
+
+def create_mosaiq_pca_loaders(
+    dataset,
+    *,
+    batch_size: int,
+    target_size: int = 8,
+    pca_dims: int = 40,
+    drop_last: bool = True,
+    shuffle: bool = True,
+    pin_memory: bool = True,
+) -> Tuple[Dict[int, DataLoader], torch.Tensor, torch.Tensor, PCA]:
+    """Build per-class dataloaders with PCA-compressed samples for MOSAIQ training."""
+
+    tensor_pca, labels, pca = prepare_mosaiq_pca_data(
+        dataset, target_size=target_size, pca_components=pca_dims
+    )
+
+    loaders: Dict[int, DataLoader] = {}
+    unique_labels = torch.unique(labels).tolist()
+
+    for label in sorted(int(l) for l in unique_labels):
+        indices = torch.nonzero(labels == label, as_tuple=False).squeeze(1)
+        subset = tensor_pca[indices]
+        loaders[label] = DataLoader(
+            subset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            drop_last=drop_last,
+            pin_memory=pin_memory,
+        )
+
+    return loaders, tensor_pca, labels, pca
+
+
+class MosaiqDiscriminator(nn.Module):
+    """Feed-forward discriminator operating on PCA-compressed vectors."""
+
+    def __init__(self, input_dim: int, hidden_dim: int = 64) -> None:
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 4, 1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        return self.model(x)
+
+
+class MosaiqQuantumGenerator(nn.Module):
+    """Quantum generator that assembles a MOSAIQ-style latent representation."""
+
+    def __init__(
+        self,
+        n_generators: int,
+        n_qubits: int,
+        q_depth: int,
+        *,
+        q_delta: float = 1.0,
+        backend: str = "lightning.qubit",
+        diff_method: str = "parameter-shift",
+    ) -> None:
+        super().__init__()
+        self.n_generators = n_generators
+        self.n_qubits = n_qubits
+        self.q_depth = q_depth
+        self.latent_dim = n_qubits
+        self.output_dim = n_generators * n_qubits
+        self._circuit_device = torch.device("cpu")
+
+        self.q_params = nn.ParameterList(
+            [nn.Parameter(q_delta * torch.rand(q_depth, n_qubits)) for _ in range(n_generators)]
+        )
+
+        dev = qml.device(backend, wires=n_qubits)
+
+        @qml.qnode(dev, interface="torch", diff_method=diff_method)
+        def circuit(noise: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
+            for q in range(self.n_qubits):
+                qml.RY(noise[q], wires=q)
+                qml.RX(noise[q], wires=q)
+
+            for layer in weights:
+                for qubit, value in enumerate(layer):
+                    qml.RY(value, wires=qubit)
+                for qubit in range(self.n_qubits - 1):
+                    qml.CZ(wires=[qubit, qubit + 1])
+
+            return qml.math.stack(
+                [qml.expval(qml.PauliX(q)) for q in range(self.n_qubits)]
+            )
+
+        self._circuit = circuit
+
+    def to(self, *args, **kwargs):  # type: ignore[override]
+        obj = super().to(*args, **kwargs)
+        for param in self.q_params:
+            if param.device != self._circuit_device:
+                param.data = param.data.to(self._circuit_device)
+        return obj
+
+    def forward(self, noise: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        if noise.dim() != 2 or noise.size(1) != self.n_qubits:
+            raise ValueError(
+                f"Expected noise with shape (batch, {self.n_qubits}), got {tuple(noise.shape)}"
+            )
+
+        orig_device = noise.device
+        noise_cpu = noise.to(self._circuit_device)
+        batch_size = noise_cpu.size(0)
+        outputs = torch.zeros(batch_size, self.output_dim, device=self._circuit_device)
+
+        for gen_idx, params in enumerate(self.q_params):
+            params_cpu = params
+            patches: List[torch.Tensor] = []
+            for sample in noise_cpu:
+                patches.append(self._circuit(sample, params_cpu))
+            patch_tensor = torch.stack(patches, dim=0)
+            start = gen_idx * self.n_qubits
+            outputs[:, start : start + self.n_qubits] = patch_tensor
+
+        return outputs.to(orig_device).float()
+
+
+def _ensure_tensor_batch(batch: Sequence[torch.Tensor] | torch.Tensor) -> torch.Tensor:
+    if isinstance(batch, torch.Tensor):
+        return batch
+    if not batch:
+        raise ValueError("Received an empty batch from the dataloader")
+    if isinstance(batch, (list, tuple)):
+        first = batch[0]
+        if isinstance(first, torch.Tensor):
+            return first
+    raise TypeError("Expected the dataloader to yield tensors or sequences of tensors")
+
+
+def train_mosaiq_gan(
+    loader: DataLoader,
+    generator: MosaiqQuantumGenerator,
+    discriminator: MosaiqDiscriminator,
+    *,
+    epochs: int = 50,
+    device: Optional[str | torch.device] = None,
+    lr_discriminator: float = 1e-2,
+    lr_generator: float = 3e-1,
+    verbose: bool = False,
+) -> Tuple[List[float], List[float]]:
+    """Train the MOSAIQ quantum GAN on PCA-compressed features."""
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    elif isinstance(device, str):
+        device = torch.device(device)
+
+    discriminator = discriminator.to(device)
+    generator = generator.to(device)
+    generator.train()
+    discriminator.train()
+
+    criterion = nn.BCELoss()
+    opt_d = torch.optim.SGD(discriminator.parameters(), lr=lr_discriminator)
+    opt_g = torch.optim.SGD(generator.parameters(), lr=lr_generator)
+
+    hist_d: List[float] = []
+    hist_g: List[float] = []
+
+    for epoch in range(epochs):
+        epoch_loss_d = 0.0
+        epoch_loss_g = 0.0
+
+        for batch in loader:
+            real = _ensure_tensor_batch(batch).to(device)
+            batch_size = real.size(0)
+
+            real_label = torch.ones((batch_size, 1), device=device)
+            fake_label = torch.zeros((batch_size, 1), device=device)
+
+            noise = torch.rand(batch_size, generator.latent_dim, device=device) * (torch.pi / 2)
+            fake = generator(noise)
+
+            opt_d.zero_grad()
+            out_real = discriminator(real)
+            out_fake = discriminator(fake.detach())
+            loss_d = criterion(out_real, real_label) + criterion(out_fake, fake_label)
+            loss_d.backward()
+            opt_d.step()
+
+            opt_g.zero_grad()
+            out_fake = discriminator(fake)
+            loss_g = criterion(out_fake, real_label)
+            loss_g.backward()
+            opt_g.step()
+
+            epoch_loss_d += loss_d.item()
+            epoch_loss_g += loss_g.item()
+
+        avg_d = epoch_loss_d / max(len(loader), 1)
+        avg_g = epoch_loss_g / max(len(loader), 1)
+        hist_d.append(avg_d)
+        hist_g.append(avg_g)
+
+        if verbose:
+            print(f"Epoch {epoch + 1}/{epochs}: D={avg_d:.4f}, G={avg_g:.4f}")
+
+    return hist_d, hist_g
