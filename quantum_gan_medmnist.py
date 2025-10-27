@@ -619,9 +619,7 @@ class MosaiqQuantumGenerator(nn.Module):
                 for qubit in range(self.n_qubits - 1):
                     qml.CZ(wires=[qubit, qubit + 1])
 
-            return qml.math.stack(
-                [qml.expval(qml.PauliX(q)) for q in range(self.n_qubits)]
-            )
+            return [qml.expval(qml.PauliX(q)) for q in range(self.n_qubits)]
 
         self._circuit = circuit
 
@@ -647,7 +645,13 @@ class MosaiqQuantumGenerator(nn.Module):
             params_cpu = params
             patches: List[torch.Tensor] = []
             for sample in noise_cpu:
-                patches.append(self._circuit(sample, params_cpu))
+                circuit_out = self._circuit(sample, params_cpu)
+                if isinstance(circuit_out, (list, tuple)):
+                    circuit_out = torch.stack(tuple(circuit_out))
+                if not isinstance(circuit_out, torch.Tensor):
+                    circuit_out = torch.tensor(circuit_out)
+                circuit_out = circuit_out.to(self._circuit_device)
+                patches.append(circuit_out)
             patch_tensor = torch.stack(patches, dim=0)
             start = gen_idx * self.n_qubits
             outputs[:, start : start + self.n_qubits] = patch_tensor
