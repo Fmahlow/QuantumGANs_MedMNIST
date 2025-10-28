@@ -159,7 +159,18 @@ class DCGenerator(nn.Module):
             nn.Tanh(),
         )
 
-    def forward(self, noise: Tensor) -> Tensor:  # noqa: D401 - short docstring
+    def forward(self, noise: Tensor, labels: Optional[Tensor] = None) -> Tensor:  # noqa: D401 - short docstring
+        """Generate images from ``noise`` ignoring optional class ``labels``.
+
+        Some balancing utilities call generators with a ``labels`` argument
+        regardless of whether the underlying architecture is conditional.  The
+        original ``DCGenerator`` only accepted noise which raised a ``TypeError``
+        when reused in those generic pipelines.  Accepting ``labels`` and
+        discarding it keeps backwards compatibility while allowing the
+        unconditional generator to plug into the shared code path.
+        """
+
+        del labels  # explicitly ignore optional labels for unconditional GANs
         return self.model(noise)
 
 
