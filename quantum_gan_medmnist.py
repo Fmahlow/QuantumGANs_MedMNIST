@@ -707,7 +707,9 @@ def train_mosaiq_gan(
         epoch_loss_g = 0.0
 
         for batch in loader:
-            real = _ensure_tensor_batch(batch).to(device)
+            real = _ensure_tensor_batch(batch)
+            non_blocking = device.type == "cuda"
+            real = real.to(device, non_blocking=non_blocking)
             batch_size = real.size(0)
 
             real_label = torch.ones((batch_size, 1), device=device)
