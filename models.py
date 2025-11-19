@@ -39,7 +39,11 @@ class PenaltyLoss(nn.Module):
         device = real.device
         batch_size = real.size(0)
 
-        alpha = torch.rand((batch_size, 1, 1, 1), device=device)
+        # Match the alpha tensor shape to the dimensionality of the inputs so that
+        # interpolation preserves the original shape (e.g., 2D latent vectors
+        # instead of unintentionally expanding to 4D tensors).
+        alpha_shape = [batch_size] + [1] * (real.dim() - 1)
+        alpha = torch.rand(alpha_shape, device=device)
         interpolates = (alpha * real + (1 - alpha) * fake).requires_grad_(True)
         logits = discriminator(interpolates)
         fake = torch.ones(logits.size(), device=device, requires_grad=False)
