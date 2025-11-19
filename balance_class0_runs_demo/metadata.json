@@ -1,7 +1,7 @@
 {
   "data_flag": "breastmnist",
   "latent_dim": 100,
-  "gan_epochs": 5,
+  "gan_epochs": 50,
   "classifier_epochs": 1,
   "num_gan_runs": 1,
   "num_generation_runs": 1,
@@ -14,5 +14,14 @@
   "real_class1_count": 399,
   "synthetic_needed_for_balance": 252,
   "total_real_samples": 546,
-  "timestamp": "2025-10-27T16:44:48Z"
+  "strategies": [
+    "ResNet sem balanceamento",
+    "DCGAN (classe 0)",
+    "CGAN (classe 0)",
+    "WGAN-GP (classe 0)",
+    "SMOTE (classe 0)",
+    "Undersampling da classe 1",
+    "Oversampling por repetição (classe 0)"
+  ],
+  "timestamp": "2025-10-28T00:57:16Z"
 }

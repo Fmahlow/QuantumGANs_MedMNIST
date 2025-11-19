@@ -1,0 +1,2 @@
+gan_run_id,generation_run_id,classifier_run_id,ratio,acc,prec,rec,f1,auc,tn,fp,fn,tp,synthetic_class0_count,balanced_dataset_size,total_real_samples,real_class0_count,real_class1_count,gan_training_time_sec,synthetic_generation_time_sec,classifier_training_time_sec,classifier_eval_time_sec,gan_seed,generation_seed,classifier_seed
+1,1,1,0.0,0.5641025641025641,0.7395833333333334,0.6228070175438597,0.6761904761904762,0.5137844611528822,17,25,43,71,252,798,546,147,399,2.4404845237731934,0.07022714614868164,6.281518936157227,0.20690655708312988,2025,3025,1003025

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import pandas as pd
 import pennylane as qml
@@ -535,7 +535,7 @@ def create_mosaiq_pca_loaders(
     batch_size: int,
     target_size: int = 8,
     pca_dims: int = 40,
-    drop_last: bool = True,
+    drop_last: bool = False,
     shuffle: bool = True,
     pin_memory: bool = True,
 ) -> Tuple[Dict[int, DataLoader], torch.Tensor, torch.Tensor, PCA]:
@@ -681,6 +681,7 @@ def train_mosaiq_gan(
     lr_discriminator: float = 1e-2,
     lr_generator: float = 3e-1,
     verbose: bool = False,
+    progress_callback: Optional[Callable[[int, int, float, float], None]] = None,
 ) -> Tuple[List[float], List[float]]:
     """Train the MOSAIQ quantum GAN on PCA-compressed features."""
 
@@ -706,7 +707,9 @@ def train_mosaiq_gan(
         epoch_loss_g = 0.0
 
         for batch in loader:
-            real = _ensure_tensor_batch(batch).to(device)
+            real = _ensure_tensor_batch(batch)
+            non_blocking = device.type == "cuda"
+            real = real.to(device, non_blocking=non_blocking)
             batch_size = real.size(0)
 
             real_label = torch.ones((batch_size, 1), device=device)
@@ -736,7 +739,9 @@ def train_mosaiq_gan(
         hist_d.append(avg_d)
         hist_g.append(avg_g)
 
-        if verbose:
+        if progress_callback is not None:
+            progress_callback(epoch + 1, epochs, avg_d, avg_g)
+        elif verbose:
             print(f"Epoch {epoch + 1}/{epochs}: D={avg_d:.4f}, G={avg_g:.4f}")
 
     return hist_d, hist_g
