@@ -168,6 +168,9 @@ class GANModule(l.LightningModule):
         )
 
     def on_train_epoch_end(self):
+        # Skip image generation when no logger is configured (e.g., training with logger=False)
+        if self.logger is None:
+            return
 
         samples = self.generate(self.sample_noise).reshape(-1, 1, 28, 28)
         samples = samples.detach().cpu().numpy()
