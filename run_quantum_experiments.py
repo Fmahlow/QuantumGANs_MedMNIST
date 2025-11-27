@@ -467,12 +467,34 @@ def run_experiments(cfg: RunConfig) -> None:
     total_models = 1 + (1 if data_bundle.mosaiq is not None else 0)
     progress = ProgressTracker(total_steps=cfg.repeats * total_models)
 
+    def make_epoch_callback(model_name: str, total_epochs: int):
+        epoch_tracker = ProgressTracker(total_epochs)
+        last = time.perf_counter()
+
+        def _callback(epoch: int, _: int, loss_d: float, loss_g: float) -> None:
+            nonlocal last
+            now = time.perf_counter()
+            epoch_tracker.step(now - last)
+            last = now
+            print(
+                f"[{model_name}] Epoch {epoch}/{total_epochs} "
+                f"D_loss={loss_d:.4f} G_loss={loss_g:.4f}",
+                flush=True,
+            )
+
+        return _callback
+
     for run_idx in range(cfg.repeats):
         # PatchQGAN
         iter_start = time.perf_counter()
         patch_gen, patch_disc = build_patch_models(cfg)
         (patch_hist, _), train_time = timed(train_quantum_gan)(
-            data_bundle.train_loader, patch_gen, patch_disc, epochs=cfg.gan_epochs, device=str(device)
+            data_bundle.train_loader,
+            patch_gen,
+            patch_disc,
+            epochs=cfg.gan_epochs,
+            device=str(device),
+            progress_callback=make_epoch_callback("patchqgan", cfg.gan_epochs),
         )
         avg_inf = measure_inference_latency(patch_gen, cfg, device)
         summary_rows.append(
@@ -541,7 +563,12 @@ def run_experiments(cfg: RunConfig) -> None:
             shuffle=True,
         )
         (_, _), train_time = timed(train_mosaiq_gan)(
-            combined_loader, mos_gen, mos_disc, epochs=cfg.gan_epochs, device=str(device)
+            combined_loader,
+            mos_gen,
+            mos_disc,
+            epochs=cfg.gan_epochs,
+            device=str(device),
+            progress_callback=make_epoch_callback("mosaiq", cfg.gan_epochs),
         )
         avg_inf = measure_inference_latency(mos_gen, cfg, device)
         summary_rows.append(
