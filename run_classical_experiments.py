@@ -1,11 +1,3 @@
-"""Orquestrador automatizado para todos os experimentos clássicos.
-
-O script consolida o fluxo que antes estava espalhado em quatro notebooks
-(``gans_classical_fid_is.ipynb``, ``gans_quantum_resources.ipynb``,
-``gans_classical_balance_class0.ipynb`` e ``gans_classical_original_balance.ipynb``),
-permitindo treinar as GANs clássicas, gerar imagens sintéticas, treinar
-classificadores e produzir os CSVs que alimentam o paper.
-"""
 from __future__ import annotations
 
 import argparse  # parser de argumentos de linha de comando
@@ -46,12 +38,12 @@ class RunConfig:
     latent_dim: int = 100  # dimensão do ruído para todas as GANs
     img_channels: int = 1  # número de canais do MedMNIST
     num_classes: int = 2  # quantidade de classes alvo
-    gan_epochs: int = 5  # épocas reduzidas para rodadas rápidas
+    gan_epochs: int = 50  # épocas reduzidas para rodadas rápidas
     clf_epochs: int = 3  # épocas do classificador de referência
     batch_size: int = 128  # tamanho de batch padrão
     num_workers: int = 0  # workers zero evita travamentos em ambientes simples
     repeats: int = 1  # quantas vezes repetir cada GAN e classificador
-    synth_ratio_grid: Tuple[float, ...] = (0.25, 0.5, 1.0)  # rácios testados
+    synth_ratio_grid: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.5)  # rácios testados
     balance_ratio: float = 0.5  # alvo de balanceamento 50/50
     output_dir: Path = Path("experiments_outputs")  # pasta para CSVs
 
@@ -97,15 +89,28 @@ def count_parameters(module: nn.Module) -> int:
 def measure_inference_latency(generator: nn.Module, cfg: RunConfig, device: torch.device) -> float:
     """Calcula tempo médio de inferência por imagem para o gerador."""
 
-    generator.eval()  # coloca em modo avaliação
-    noise = torch.randn(32, cfg.latent_dim, 1, 1, device=device)  # ruído fixo
-    with torch.no_grad():  # desativa gradiente
-        start = time.perf_counter()  # marca início
-        images = generator(noise)  # gera lote de imagens
-        torch.cuda.synchronize(device) if device.type == "cuda" else None  # garante finalização
-        elapsed = time.perf_counter() - start  # tempo decorrido
-    per_image = elapsed / images.size(0)  # tempo médio por amostra
-    return per_image  # devolve métrica
+    generator.eval()
+    batch_size = 32
+    noise = torch.randn(batch_size, cfg.latent_dim, 1, 1, device=device)
+
+    with torch.no_grad():
+        if isinstance(generator, CGANGenerator):
+            # gera labels dummy só pra medir tempo (por ex. aleatórias)
+            labels = torch.randint(0, cfg.num_classes, (batch_size,), device=device)
+            start = time.perf_counter()
+            images = generator(noise, labels)
+        else:
+            start = time.perf_counter()
+            images = generator(noise)
+
+        if device.type == "cuda":
+            torch.cuda.synchronize(device)
+
+        elapsed = time.perf_counter() - start
+
+    per_image = elapsed / images.size(0)
+    return per_image
+
 
 
 def generate_synthetic(
