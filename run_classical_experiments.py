@@ -30,6 +30,27 @@ from classical_gans import (  # arquiteturas e loops de treino existentes
 from medmnist_data import load_medmnist_data  # carregamento do dataset base
 
 
+class ProgressTracker:
+    """Controla o progresso para estimar tempo restante."""
+
+    def __init__(self, total_steps: int) -> None:
+        self.total_steps = total_steps
+        self.completed = 0
+        self.start_time = time.perf_counter()
+        self.accumulated = 0.0
+
+    def step(self, elapsed: float) -> None:
+        self.completed += 1
+        self.accumulated += elapsed
+        avg = self.accumulated / max(self.completed, 1)
+        remaining = max(self.total_steps - self.completed, 0) * avg
+        print(
+            f"[ETA] {self.completed}/{self.total_steps} etapas completas. "
+            f"Tempo médio {avg:.1f}s | Estimativa restante {remaining:.1f}s",
+            flush=True,
+        )
+
+
 @dataclass
 class RunConfig:
     """Configuração de alto nível para cada rodada de experimento."""
@@ -465,6 +486,23 @@ def save_csv(rows: List[Dict[str, float]], path: Path) -> None:
     pd.DataFrame(rows).to_csv(path, index=False)  # exporta direto
 
 
+def save_average_csv(rows: List[Dict[str, float]], path: Path, group_keys: List[str]) -> None:
+    """Agrega colunas numéricas por chaves e salva versão média."""
+
+    import pandas as pd
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df.to_csv(path, index=False)
+        return
+
+    numeric_cols = [
+        col for col in df.select_dtypes(include=["number"]).columns.tolist() if col not in group_keys and col != "Run"
+    ]
+    grouped = df.groupby(group_keys)[numeric_cols].mean().reset_index()
+    grouped.to_csv(path, index=False)
+
+
 def main() -> None:
     """Ponto de entrada CLI para orquestrar todos os experimentos."""
 
@@ -506,8 +544,11 @@ def main() -> None:
         )
     )
 
+    progress = ProgressTracker(total_steps=cfg.repeats * 3)  # três modelos
+
     for model_name in ("dcgan", "cgan", "wgan"):  # percorre modelos
         for run_idx in range(cfg.repeats):  # repetições
+            iter_start = time.perf_counter()
             metrics_row = train_single_gan(model_name, data_bundle, cfg, device)  # executa treino
             summary_rows.append(
                 {
@@ -566,11 +607,31 @@ def main() -> None:
                 )
             )
 
+            progress.step(time.perf_counter() - iter_start)
+
     save_csv(summary_rows, cfg.output_dir / "classical_efficiency.csv")  # salva CSV 1
     save_csv(fid_rows, cfg.output_dir / "classical_synthetic_quality.csv")  # salva CSV 2
     save_csv(balance_rows, cfg.output_dir / "classical_balancing_strategies.csv")  # salva CSV 3
     save_csv(ratio_bal_rows, cfg.output_dir / "classical_balanced_ratios.csv")  # salva CSV 4
     save_csv(ratio_orig_rows, cfg.output_dir / "classical_original_ratio_with_synth.csv")  # salva CSV 5
+
+    save_average_csv(summary_rows, cfg.output_dir / "average_classical_efficiency.csv", ["Model"])
+    save_average_csv(fid_rows, cfg.output_dir / "average_classical_synthetic_quality.csv", ["Model"])
+    save_average_csv(
+        balance_rows,
+        cfg.output_dir / "average_classical_balancing_strategies.csv",
+        ["Model", "Strategy", "Ratio"],
+    )
+    save_average_csv(
+        ratio_bal_rows,
+        cfg.output_dir / "average_classical_balanced_ratios.csv",
+        ["Model", "Ratio"],
+    )
+    save_average_csv(
+        ratio_orig_rows,
+        cfg.output_dir / "average_classical_original_ratio_with_synth.csv",
+        ["Model", "Ratio"],
+    )
 
     cfg_dict = asdict(cfg)  # converte dataclass em dicionário simples
     cfg_dict["output_dir"] = str(cfg.output_dir)  # transforma Path em string para JSON
