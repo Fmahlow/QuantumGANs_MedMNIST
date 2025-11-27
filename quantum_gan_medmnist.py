@@ -2,7 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
+
+if sys.version_info < (3, 9):
+    msg = (
+        "Pennylane >=0.37 usa anotações de tipo no estilo PEP 585 (por exemplo, list[int]), "
+        "que exigem Python 3.9 ou superior. Atualize sua versão do Python para executar os "
+        "experimentos quânticos."
+    )
+    raise RuntimeError(msg)
 
 import pandas as pd
 import pennylane as qml
