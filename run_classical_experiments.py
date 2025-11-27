@@ -5,7 +5,7 @@ import json  # exportar configurações usadas
 import time  # medir tempos de execução
 from dataclasses import dataclass, asdict  # estruturas de configuração
 from pathlib import Path  # manipulação conveniente de caminhos
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np  # operações vetoriais usadas em métricas
 import torch  # base para treino e geração das GANs
@@ -255,47 +255,66 @@ def numpy_to_dataset(X: np.ndarray, y: np.ndarray, cfg: RunConfig) -> TensorData
 
 def evaluate_balancing_strategies(
     base_loader: Iterable,
-    generator: nn.Module,
+    generator: Optional[nn.Module],
     test_loader: DataLoader,
     cfg: RunConfig,
     device: torch.device,
+    model_name: str,
+    run_idx: int,
+    include_classical: bool = True,
 ) -> List[Dict[str, float]]:
     """Executa avaliação comparativa das estratégias de balanceamento."""
 
     X_real, y_real = prepare_flattened_dataset(base_loader, device)  # extrai base real
     rows: List[Dict[str, float]] = []  # acumula resultados
 
-    real_dataset = numpy_to_dataset(X_real, y_real, cfg)  # dataset sem balanceamento
-    metrics_base, train_time = train_classifier(real_dataset, test_loader, cfg, device)  # métrica baseline
-    rows.append({"Strategy": "None", **metrics_base, "Ratio": 0.0, "Synth": 0, "TrainTime": train_time})  # registra linha
-
-    for strategy in ("smote", "undersampling", "oversampling"):  # laço sobre técnicas clássicas
-        X_bal, y_bal = apply_sampling_strategy(X_real, y_real, strategy)  # aplica sampler
-        dataset_bal = numpy_to_dataset(X_bal, y_bal, cfg)  # cria dataset
-        metrics_bal, train_time = train_classifier(dataset_bal, test_loader, cfg, device)  # mede desempenho
-        synth_count = len(y_bal) - len(y_real)  # quantidade extra
+    if include_classical:
+        real_dataset = numpy_to_dataset(X_real, y_real, cfg)  # dataset sem balanceamento
+        metrics_base, train_time = train_classifier(real_dataset, test_loader, cfg, device)  # métrica baseline
         rows.append(
             {
-                "Strategy": strategy,
-                **metrics_bal,
+                "Model": model_name,
+                "Run": run_idx,
+                "Strategy": "None",
+                **metrics_base,
+                "Ratio": 0.0,
+                "Synth": 0,
+                "TrainTime": train_time,
+            }
+        )  # registra linha
+
+        for strategy in ("smote", "undersampling", "oversampling"):  # laço sobre técnicas clássicas
+            X_bal, y_bal = apply_sampling_strategy(X_real, y_real, strategy)  # aplica sampler
+            dataset_bal = numpy_to_dataset(X_bal, y_bal, cfg)  # cria dataset
+            metrics_bal, train_time = train_classifier(dataset_bal, test_loader, cfg, device)  # mede desempenho
+            synth_count = len(y_bal) - len(y_real)  # quantidade extra
+            rows.append(
+                {
+                    "Model": model_name,
+                    "Run": run_idx,
+                    "Strategy": strategy,
+                    **metrics_bal,
+                    "Ratio": cfg.balance_ratio,
+                    "Synth": synth_count,
+                    "TrainTime": train_time,
+                }
+            )
+
+    if generator is not None:
+        balanced_dataset = build_balanced_dataset(base_loader, generator, cfg, device)  # dataset via GAN
+        metrics_gan, train_time = train_classifier(balanced_dataset, test_loader, cfg, device)  # avalia
+        synth_count = len(balanced_dataset) - len(X_real)  # calcula extras
+        rows.append(
+            {
+                "Model": model_name,
+                "Run": run_idx,
+                "Strategy": "gan_balanced",
+                **metrics_gan,
                 "Ratio": cfg.balance_ratio,
                 "Synth": synth_count,
                 "TrainTime": train_time,
             }
         )
-
-    balanced_dataset = build_balanced_dataset(base_loader, generator, cfg, device)  # dataset via GAN
-    metrics_gan, train_time = train_classifier(balanced_dataset, test_loader, cfg, device)  # avalia
-    synth_count = len(balanced_dataset) - len(X_real)  # calcula extras
-    rows.append(
-        {
-            "Strategy": "gan_balanced",
-            **metrics_gan,
-            "Ratio": cfg.balance_ratio,
-            "Synth": synth_count,
-            "TrainTime": train_time,
-        }
-    )
     return rows  # devolve todas as linhas
 
 
@@ -306,6 +325,8 @@ def vary_synth_ratio(
     cfg: RunConfig,
     device: torch.device,
     preserve_original_ratio: bool,
+    model_name: str,
+    run_idx: int,
 ) -> List[Dict[str, float]]:
     """Avalia diferentes rácios de dados sintéticos mantendo ou não balanceamento."""
 
@@ -328,7 +349,15 @@ def vary_synth_ratio(
 
         dataset = TensorDataset(combined_images, combined_labels)  # dataset final
         metrics_row, train_time = train_classifier(dataset, test_loader, cfg, device)  # avalia
-        rows.append({"Ratio": ratio, **metrics_row, "TrainTime": train_time})  # registra linha
+        rows.append(
+            {
+                "Model": model_name,
+                "Run": run_idx,
+                "Ratio": ratio,
+                **metrics_row,
+                "TrainTime": train_time,
+            }
+        )  # registra linha
     return rows  # retorna experimentos
 
 
@@ -464,6 +493,19 @@ def main() -> None:
     ratio_bal_rows: List[Dict[str, float]] = []  # CSV 4: rácios mantendo balanceamento
     ratio_orig_rows: List[Dict[str, float]] = []  # CSV 5: rácios mantendo proporção original
 
+    balance_rows.extend(
+        evaluate_balancing_strategies(
+            data_bundle.train_loader,
+            generator=None,
+            test_loader=data_bundle.test_loader,
+            cfg=cfg,
+            device=device,
+            model_name="baseline",
+            run_idx=0,
+            include_classical=True,
+        )
+    )
+
     for model_name in ("dcgan", "cgan", "wgan"):  # percorre modelos
         for run_idx in range(cfg.repeats):  # repetições
             metrics_row = train_single_gan(model_name, data_bundle, cfg, device)  # executa treino
@@ -489,7 +531,14 @@ def main() -> None:
 
             balance_rows.extend(
                 evaluate_balancing_strategies(
-                    data_bundle.train_loader, generator, data_bundle.test_loader, cfg, device
+                    data_bundle.train_loader,
+                    generator,
+                    data_bundle.test_loader,
+                    cfg,
+                    device,
+                    model_name,
+                    run_idx,
+                    include_classical=False,
                 )
             )
             ratio_bal_rows.extend(
@@ -500,6 +549,8 @@ def main() -> None:
                     cfg,
                     device,
                     preserve_original_ratio=False,
+                    model_name=model_name,
+                    run_idx=run_idx,
                 )
             )
             ratio_orig_rows.extend(
@@ -510,6 +561,8 @@ def main() -> None:
                     cfg,
                     device,
                     preserve_original_ratio=True,
+                    model_name=model_name,
+                    run_idx=run_idx,
                 )
             )
 
