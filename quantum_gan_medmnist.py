@@ -13,6 +13,8 @@ if sys.version_info < (3, 9):
     )
     raise RuntimeError(msg)
 
+import warnings
+
 import pandas as pd
 import pennylane as qml
 import torch
@@ -48,6 +50,25 @@ __all__ = [
     "prepare_mosaiq_pca_data",
     "create_mosaiq_pca_loaders",
 ]
+
+
+def _create_qml_device(
+    backend: str, n_qubits: int, device_kwargs: Optional[Dict[str, Any]]
+) -> qml.Device:
+    kwargs = dict(device_kwargs or {})
+    try:
+        return qml.device(backend, wires=n_qubits, **kwargs)
+    except (ImportError, ModuleNotFoundError) as exc:
+        if backend.startswith("lightning."):
+            warnings.warn(
+                (
+                    f"Backend '{backend}' is unavailable ({exc}). "
+                    "Falling back to 'default.qubit'."
+                ),
+                UserWarning,
+            )
+            return qml.device("default.qubit", wires=n_qubits, **kwargs)
+        raise
 
 
 class Discriminator(nn.Module):
@@ -117,7 +138,7 @@ class PatchQuantumGenerator(nn.Module):
             ]
         )
 
-        dev = qml.device(backend, wires=n_qubits, **(device_kwargs or {}))
+        dev = _create_qml_device(backend, n_qubits, device_kwargs)
 
         @qml.qnode(dev, interface="torch", diff_method=diff_method)
         def circuit(noise: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -645,7 +666,7 @@ class MosaiqQuantumGenerator(nn.Module):
             ]
         )
 
-        dev = qml.device(backend, wires=n_qubits, **(device_kwargs or {}))
+        dev = _create_qml_device(backend, n_qubits, device_kwargs)
 
         @qml.qnode(dev, interface="torch", diff_method=diff_method)
         def circuit(noise: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
