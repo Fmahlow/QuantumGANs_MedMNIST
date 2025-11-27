@@ -519,7 +519,9 @@ def main() -> None:
     save_csv(ratio_bal_rows, cfg.output_dir / "balanced_ratios.csv")  # salva CSV 4
     save_csv(ratio_orig_rows, cfg.output_dir / "original_ratio_with_synth.csv")  # salva CSV 5
 
-    (cfg.output_dir / "config_used.json").write_text(json.dumps(asdict(cfg), indent=2))  # salva config
+    cfg_dict = asdict(cfg)  # converte dataclass em dicionário simples
+    cfg_dict["output_dir"] = str(cfg.output_dir)  # transforma Path em string para JSON
+    (cfg.output_dir / "config_used.json").write_text(json.dumps(cfg_dict, indent=2))  # salva config
 
 
 if __name__ == "__main__":  # execução direta
