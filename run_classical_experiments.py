@@ -406,7 +406,7 @@ def train_single_gan(
         train_fn = lambda: train_wgangp(
             data_bundle.train_loader,
             G=generator,
-            critic=discriminator,
+            D=discriminator,
             latent_dim=cfg.latent_dim,
             num_epochs=cfg.gan_epochs,
             device=device,
