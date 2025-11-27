@@ -60,14 +60,11 @@ def _create_qml_device(
         return qml.device(backend, wires=n_qubits, **kwargs)
     except (ImportError, ModuleNotFoundError) as exc:
         if backend.startswith("lightning."):
-            warnings.warn(
-                (
-                    f"Backend '{backend}' is unavailable ({exc}). "
-                    "Falling back to 'default.qubit'."
-                ),
-                UserWarning,
-            )
-            return qml.device("default.qubit", wires=n_qubits, **kwargs)
+            raise RuntimeError(
+                "O backend lightning.* foi solicitado, mas não está disponível. "
+                "Instale o pacote correspondente (por exemplo, 'pip install pennylane-lightning') "
+                "ou ajuste o parâmetro --qml-backend para um backend suportado."
+            ) from exc
         raise
 
 
@@ -191,6 +188,8 @@ def train_quantum_gan(
     device: Optional[str] = None,
     lr_discriminator: float = 1e-2,
     lr_generator: float = 3e-1,
+    verbose: bool = False,
+    progress_callback: Optional[Callable[[int, int, float, float], None]] = None,
 ) -> Tuple[List[float], List[float]]:
     """Train a quantum GAN and return discriminator and generator loss histories."""
 
@@ -235,8 +234,15 @@ def train_quantum_gan(
             epoch_loss_d += loss_d.item()
             epoch_loss_g += loss_g.item()
 
-        hist_d.append(epoch_loss_d / len(loader))
-        hist_g.append(epoch_loss_g / len(loader))
+        avg_d = epoch_loss_d / max(len(loader), 1)
+        avg_g = epoch_loss_g / max(len(loader), 1)
+        hist_d.append(avg_d)
+        hist_g.append(avg_g)
+
+        if progress_callback is not None:
+            progress_callback(epoch + 1, epochs, avg_d, avg_g)
+        elif verbose:
+            print(f"Epoch {epoch + 1}/{epochs}: D={avg_d:.4f}, G={avg_g:.4f}")
 
     return hist_d, hist_g
 
