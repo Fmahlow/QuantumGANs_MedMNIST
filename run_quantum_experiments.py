@@ -37,6 +37,26 @@ from quantum_gan_medmnist import (
 )
 
 
+class ProgressTracker:
+    """Estimativa simples de tempo restante com base em etapas concluídas."""
+
+    def __init__(self, total_steps: int) -> None:
+        self.total_steps = total_steps
+        self.completed = 0
+        self.accumulated = 0.0
+
+    def step(self, elapsed: float) -> None:
+        self.completed += 1
+        self.accumulated += elapsed
+        avg = self.accumulated / max(self.completed, 1)
+        remaining = max(self.total_steps - self.completed, 0) * avg
+        print(
+            f"[ETA] {self.completed}/{self.total_steps} etapas completas. "
+            f"Tempo médio {avg:.1f}s | Estimativa restante {remaining:.1f}s",
+            flush=True,
+        )
+
+
 def _default_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -190,6 +210,22 @@ def save_csv(rows: List[Dict[str, object]], path: Path) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def save_average_csv(rows: List[Dict[str, object]], path: Path, group_keys: List[str]) -> None:
+    import pandas as pd
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        df.to_csv(path, index=False)
+        return
+
+    numeric_cols = [
+        col for col in df.select_dtypes(include=["number"]).columns.tolist() if col not in group_keys and col != "Run"
+    ]
+    grouped = df.groupby(group_keys)[numeric_cols].mean().reset_index()
+    grouped.to_csv(path, index=False)
 
 
 def evaluate_fid_is(
@@ -401,8 +437,12 @@ def run_experiments(cfg: RunConfig) -> None:
     ratio_bal_rows: List[Dict[str, object]] = []
     ratio_orig_rows: List[Dict[str, object]] = []
 
+    total_models = 1 + (1 if data_bundle.mosaiq is not None else 0)
+    progress = ProgressTracker(total_steps=cfg.repeats * total_models)
+
     for run_idx in range(cfg.repeats):
         # PatchQGAN
+        iter_start = time.perf_counter()
         patch_gen, patch_disc = build_patch_models(cfg)
         (patch_hist, _), train_time = timed(train_quantum_gan)(
             data_bundle.train_loader, patch_gen, patch_disc, epochs=cfg.gan_epochs, device=str(device)
@@ -460,9 +500,12 @@ def run_experiments(cfg: RunConfig) -> None:
             )
         )
 
+        progress.step(time.perf_counter() - iter_start)
+
         # MOSAIQ
         if data_bundle.mosaiq is None:
             continue
+        iter_start = time.perf_counter()
         mosaiq = data_bundle.mosaiq
         mos_gen, mos_disc = build_mosaiq_models(cfg)
         combined_loader = DataLoader(
@@ -484,11 +527,31 @@ def run_experiments(cfg: RunConfig) -> None:
             }
         )
 
+        progress.step(time.perf_counter() - iter_start)
+
     save_csv(summary_rows, cfg.output_dir / "quantum_efficiency.csv")
     save_csv(fid_rows, cfg.output_dir / "quantum_synthetic_quality.csv")
     save_csv(balance_rows, cfg.output_dir / "quantum_balancing_strategies.csv")
     save_csv(ratio_bal_rows, cfg.output_dir / "quantum_balanced_ratios.csv")
     save_csv(ratio_orig_rows, cfg.output_dir / "quantum_original_ratio_with_synth.csv")
+
+    save_average_csv(summary_rows, cfg.output_dir / "average_quantum_efficiency.csv", ["Model"])
+    save_average_csv(fid_rows, cfg.output_dir / "average_quantum_synthetic_quality.csv", ["Model"])
+    save_average_csv(
+        balance_rows,
+        cfg.output_dir / "average_quantum_balancing_strategies.csv",
+        ["Model", "Strategy", "Ratio"],
+    )
+    save_average_csv(
+        ratio_bal_rows,
+        cfg.output_dir / "average_quantum_balanced_ratios.csv",
+        ["Model", "Ratio"],
+    )
+    save_average_csv(
+        ratio_orig_rows,
+        cfg.output_dir / "average_quantum_original_ratio_with_synth.csv",
+        ["Model", "Ratio"],
+    )
 
     cfg_dict = asdict(cfg)
     cfg_dict["output_dir"] = str(cfg.output_dir)
