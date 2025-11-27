@@ -79,6 +79,11 @@ class RunConfig:
     q_depth: int = 6
     pca_dims: int = 40
     output_dir: Path = Path("experiments_outputs")
+    qml_backend: str = "lightning.qubit"
+    qml_diff_method: str = "parameter-shift"
+    qml_batch_obs: Optional[int] = None
+    qml_mpi: bool = False
+    qml_circuit_device: Optional[str] = None
 
 
 @dataclass
@@ -140,12 +145,21 @@ def measure_inference_latency(generator: nn.Module, cfg: RunConfig, device: torc
 def build_patch_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
     patch_size = 2 ** (cfg.latent_dim - cfg.n_a_qubits)
     n_generators = (cfg.target_img_size ** 2) // patch_size
+    device_kwargs: Dict[str, object] = {}
+    if cfg.qml_batch_obs is not None:
+        device_kwargs["batch_obs"] = cfg.qml_batch_obs
+    if cfg.qml_mpi:
+        device_kwargs["mpi"] = True
     generator = PatchQuantumGenerator(
         n_generators,
         cfg.target_img_size,
         n_qubits=cfg.latent_dim,
         n_a_qubits=cfg.n_a_qubits,
         q_depth=cfg.q_depth,
+        backend=cfg.qml_backend,
+        diff_method=cfg.qml_diff_method,
+        circuit_device=cfg.qml_circuit_device,
+        device_kwargs=device_kwargs,
     )
     discriminator = Discriminator(img_size=cfg.target_img_size)
     return generator, discriminator
@@ -154,7 +168,20 @@ def build_patch_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
 def build_mosaiq_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
     patch_size = 2 ** (cfg.latent_dim - cfg.n_a_qubits)
     n_generators = (cfg.target_img_size ** 2) // patch_size
-    generator = MosaiqQuantumGenerator(n_generators, cfg.latent_dim, cfg.q_depth)
+    device_kwargs: Dict[str, object] = {}
+    if cfg.qml_batch_obs is not None:
+        device_kwargs["batch_obs"] = cfg.qml_batch_obs
+    if cfg.qml_mpi:
+        device_kwargs["mpi"] = True
+    generator = MosaiqQuantumGenerator(
+        n_generators,
+        cfg.latent_dim,
+        cfg.q_depth,
+        backend=cfg.qml_backend,
+        diff_method=cfg.qml_diff_method,
+        circuit_device=cfg.qml_circuit_device,
+        device_kwargs=device_kwargs,
+    )
     discriminator = MosaiqDiscriminator(input_dim=cfg.pca_dims)
     return generator, discriminator
 
@@ -575,6 +602,16 @@ def parse_args() -> RunConfig:
     parser.add_argument("--pca-dims", type=int, default=40)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("experiments_outputs"))
+    parser.add_argument("--qml-backend", type=str, default="lightning.qubit")
+    parser.add_argument("--qml-diff-method", type=str, default="parameter-shift")
+    parser.add_argument("--qml-batch-obs", type=int, default=None)
+    parser.add_argument("--qml-mpi", action="store_true", help="Enable MPI backend for lightning.gpu")
+    parser.add_argument(
+        "--qml-circuit-device",
+        type=str,
+        default=None,
+        help="Force the torch device used to run QNodes (e.g., 'cuda' to align with lightning.gpu)",
+    )
     args = parser.parse_args()
 
     return RunConfig(
@@ -589,6 +626,11 @@ def parse_args() -> RunConfig:
         pca_dims=args.pca_dims,
         repeats=args.repeats,
         output_dir=args.output_dir,
+        qml_backend=args.qml_backend,
+        qml_diff_method=args.qml_diff_method,
+        qml_batch_obs=args.qml_batch_obs,
+        qml_mpi=args.qml_mpi,
+        qml_circuit_device=args.qml_circuit_device,
     )
 
 
