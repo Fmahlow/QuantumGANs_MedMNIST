@@ -60,11 +60,23 @@ def _create_qml_device(
         return qml.device(backend, wires=n_qubits, **kwargs)
     except (ImportError, ModuleNotFoundError) as exc:
         if backend.startswith("lightning."):
-            raise RuntimeError(
-                "O backend lightning.* foi solicitado, mas não está disponível. "
+            fallback_backend = "default.qubit"
+            warnings.warn(
+                "O backend lightning.* não está disponível no ambiente atual. "
+                f"Alternando automaticamente para '{fallback_backend}'. "
                 "Instale o pacote correspondente (por exemplo, 'pip install pennylane-lightning') "
-                "ou ajuste o parâmetro --qml-backend para um backend suportado."
-            ) from exc
+                "para habilitar novamente o backend solicitado.",
+                UserWarning,
+            )
+
+            try:
+                return qml.device(fallback_backend, wires=n_qubits, **kwargs)
+            except Exception as fallback_exc:  # pragma: no cover - fallback é best-effort
+                raise RuntimeError(
+                    "O backend lightning.* foi solicitado, mas não está disponível. "
+                    "Instale o pacote correspondente (por exemplo, 'pip install pennylane-lightning') "
+                    "ou ajuste o parâmetro --qml-backend para um backend suportado."
+                ) from fallback_exc
         raise
 
 
