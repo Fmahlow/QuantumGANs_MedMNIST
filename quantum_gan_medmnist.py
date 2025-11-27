@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 if sys.version_info < (3, 9):
     msg = (
@@ -83,6 +83,8 @@ class PatchQuantumGenerator(nn.Module):
         q_delta: float = 1.0,
         backend: str = "lightning.qubit",
         diff_method: str = "parameter-shift",
+        circuit_device: Optional[torch.device | str] = None,
+        device_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.n_qubits = n_qubits
@@ -91,6 +93,15 @@ class PatchQuantumGenerator(nn.Module):
         self.target_img_size = target_img_size
         self.latent_dim = n_qubits
         self.patch_size = 2 ** (n_qubits - n_a_qubits)
+        self._circuit_device = torch.device(
+            circuit_device
+            if circuit_device is not None
+            else (
+                "cuda"
+                if backend.endswith(".gpu") and torch.cuda.is_available()
+                else "cpu"
+            )
+        )
 
         if (target_img_size**2) % self.patch_size != 0:
             raise ValueError(
@@ -98,10 +109,15 @@ class PatchQuantumGenerator(nn.Module):
             )
 
         self.q_params = nn.ParameterList(
-            [nn.Parameter(q_delta * torch.rand(q_depth * n_qubits)) for _ in range(n_generators)]
+            [
+                nn.Parameter(
+                    q_delta * torch.rand(q_depth * n_qubits, device=self._circuit_device)
+                )
+                for _ in range(n_generators)
+            ]
         )
 
-        dev = qml.device(backend, wires=n_qubits)
+        dev = qml.device(backend, wires=n_qubits, **(device_kwargs or {}))
 
         @qml.qnode(dev, interface="torch", diff_method=diff_method)
         def circuit(noise: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
@@ -601,6 +617,8 @@ class MosaiqQuantumGenerator(nn.Module):
         q_delta: float = 1.0,
         backend: str = "lightning.qubit",
         diff_method: str = "parameter-shift",
+        circuit_device: Optional[torch.device | str] = None,
+        device_kwargs: Optional[Dict[str, Any]] = None,
     ) -> None:
         super().__init__()
         self.n_generators = n_generators
@@ -608,13 +626,26 @@ class MosaiqQuantumGenerator(nn.Module):
         self.q_depth = q_depth
         self.latent_dim = n_qubits
         self.output_dim = n_generators * n_qubits
-        self._circuit_device = torch.device("cpu")
-
-        self.q_params = nn.ParameterList(
-            [nn.Parameter(q_delta * torch.rand(q_depth, n_qubits)) for _ in range(n_generators)]
+        self._circuit_device = torch.device(
+            circuit_device
+            if circuit_device is not None
+            else (
+                "cuda"
+                if backend.endswith(".gpu") and torch.cuda.is_available()
+                else "cpu"
+            )
         )
 
-        dev = qml.device(backend, wires=n_qubits)
+        self.q_params = nn.ParameterList(
+            [
+                nn.Parameter(
+                    q_delta * torch.rand(q_depth, n_qubits, device=self._circuit_device)
+                )
+                for _ in range(n_generators)
+            ]
+        )
+
+        dev = qml.device(backend, wires=n_qubits, **(device_kwargs or {}))
 
         @qml.qnode(dev, interface="torch", diff_method=diff_method)
         def circuit(noise: torch.Tensor, weights: torch.Tensor) -> torch.Tensor:
