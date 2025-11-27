@@ -609,27 +609,30 @@ def main() -> None:
 
             progress.step(time.perf_counter() - iter_start)
 
-    save_csv(summary_rows, cfg.output_dir / "classical_efficiency.csv")  # salva CSV 1
-    save_csv(fid_rows, cfg.output_dir / "classical_synthetic_quality.csv")  # salva CSV 2
-    save_csv(balance_rows, cfg.output_dir / "classical_balancing_strategies.csv")  # salva CSV 3
-    save_csv(ratio_bal_rows, cfg.output_dir / "classical_balanced_ratios.csv")  # salva CSV 4
-    save_csv(ratio_orig_rows, cfg.output_dir / "classical_original_ratio_with_synth.csv")  # salva CSV 5
+    def csv_path(base_name: str) -> Path:
+        return cfg.output_dir / f"{base_name}_{cfg.repeats}.csv"
 
-    save_average_csv(summary_rows, cfg.output_dir / "average_classical_efficiency.csv", ["Model"])
-    save_average_csv(fid_rows, cfg.output_dir / "average_classical_synthetic_quality.csv", ["Model"])
+    save_csv(summary_rows, csv_path("classical_efficiency"))  # salva CSV 1
+    save_csv(fid_rows, csv_path("classical_synthetic_quality"))  # salva CSV 2
+    save_csv(balance_rows, csv_path("classical_balancing_strategies"))  # salva CSV 3
+    save_csv(ratio_bal_rows, csv_path("classical_balanced_ratios"))  # salva CSV 4
+    save_csv(ratio_orig_rows, csv_path("classical_original_ratio_with_synth"))  # salva CSV 5
+
+    save_average_csv(summary_rows, csv_path("average_classical_efficiency"), ["Model"])
+    save_average_csv(fid_rows, csv_path("average_classical_synthetic_quality"), ["Model"])
     save_average_csv(
         balance_rows,
-        cfg.output_dir / "average_classical_balancing_strategies.csv",
+        csv_path("average_classical_balancing_strategies"),
         ["Model", "Strategy", "Ratio"],
     )
     save_average_csv(
         ratio_bal_rows,
-        cfg.output_dir / "average_classical_balanced_ratios.csv",
+        csv_path("average_classical_balanced_ratios"),
         ["Model", "Ratio"],
     )
     save_average_csv(
         ratio_orig_rows,
-        cfg.output_dir / "average_classical_original_ratio_with_synth.csv",
+        csv_path("average_classical_original_ratio_with_synth"),
         ["Model", "Ratio"],
     )
 

@@ -529,27 +529,30 @@ def run_experiments(cfg: RunConfig) -> None:
 
         progress.step(time.perf_counter() - iter_start)
 
-    save_csv(summary_rows, cfg.output_dir / "quantum_efficiency.csv")
-    save_csv(fid_rows, cfg.output_dir / "quantum_synthetic_quality.csv")
-    save_csv(balance_rows, cfg.output_dir / "quantum_balancing_strategies.csv")
-    save_csv(ratio_bal_rows, cfg.output_dir / "quantum_balanced_ratios.csv")
-    save_csv(ratio_orig_rows, cfg.output_dir / "quantum_original_ratio_with_synth.csv")
+    def csv_path(base_name: str) -> Path:
+        return cfg.output_dir / f"{base_name}_{cfg.repeats}.csv"
 
-    save_average_csv(summary_rows, cfg.output_dir / "average_quantum_efficiency.csv", ["Model"])
-    save_average_csv(fid_rows, cfg.output_dir / "average_quantum_synthetic_quality.csv", ["Model"])
+    save_csv(summary_rows, csv_path("quantum_efficiency"))
+    save_csv(fid_rows, csv_path("quantum_synthetic_quality"))
+    save_csv(balance_rows, csv_path("quantum_balancing_strategies"))
+    save_csv(ratio_bal_rows, csv_path("quantum_balanced_ratios"))
+    save_csv(ratio_orig_rows, csv_path("quantum_original_ratio_with_synth"))
+
+    save_average_csv(summary_rows, csv_path("average_quantum_efficiency"), ["Model"])
+    save_average_csv(fid_rows, csv_path("average_quantum_synthetic_quality"), ["Model"])
     save_average_csv(
         balance_rows,
-        cfg.output_dir / "average_quantum_balancing_strategies.csv",
+        csv_path("average_quantum_balancing_strategies"),
         ["Model", "Strategy", "Ratio"],
     )
     save_average_csv(
         ratio_bal_rows,
-        cfg.output_dir / "average_quantum_balanced_ratios.csv",
+        csv_path("average_quantum_balanced_ratios"),
         ["Model", "Ratio"],
     )
     save_average_csv(
         ratio_orig_rows,
-        cfg.output_dir / "average_quantum_original_ratio_with_synth.csv",
+        csv_path("average_quantum_original_ratio_with_synth"),
         ["Model", "Ratio"],
     )
 
