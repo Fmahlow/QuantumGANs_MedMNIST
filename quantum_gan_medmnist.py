@@ -561,7 +561,7 @@ def prepare_mosaiq_pca_data(
     *,
     target_size: int = 8,
     pca_components: int = 40,
-) -> Tuple[torch.Tensor, torch.Tensor, PCA]:
+) -> Tuple[torch.Tensor, torch.Tensor, PCA, float, float, float, float]:
     """Return PCA-compressed tensors for the MOSAIQ GAN pipeline.
 
     The dataset is resized to ``target_size`` before being flattened and compressed
@@ -575,10 +575,14 @@ def prepare_mosaiq_pca_data(
     )
 
     flat_imgs = lowres_tensor.reshape(lowres_tensor.size(0), -1).cpu().numpy()
+    input_min = float(flat_imgs.min())
+    input_max = float(flat_imgs.max())
     scaled_inputs = scale_data(flat_imgs, (0.0, 1.0))
 
     pca = PCA(n_components=pca_components)
     pca_data = pca.fit_transform(scaled_inputs)
+    pca_min = float(pca_data.min())
+    pca_max = float(pca_data.max())
     scaled_pca = scale_data(pca_data)
     tensor_pca = torch.from_numpy(scaled_pca).float()
 
@@ -590,7 +594,7 @@ def prepare_mosaiq_pca_data(
         raise AttributeError("Dataset must expose 'labels' or 'targets' with the class ids")
 
     labels = labels.to(torch.long)
-    return tensor_pca, labels, pca
+    return tensor_pca, labels, pca, pca_min, pca_max, input_min, input_max
 
 
 def create_mosaiq_pca_loaders(
@@ -602,10 +606,10 @@ def create_mosaiq_pca_loaders(
     drop_last: bool = False,
     shuffle: bool = True,
     pin_memory: bool = True,
-) -> Tuple[Dict[int, DataLoader], torch.Tensor, torch.Tensor, PCA]:
+) -> Tuple[Dict[int, DataLoader], torch.Tensor, torch.Tensor, PCA, float, float, float, float]:
     """Build per-class dataloaders with PCA-compressed samples for MOSAIQ training."""
 
-    tensor_pca, labels, pca = prepare_mosaiq_pca_data(
+    tensor_pca, labels, pca, pca_min, pca_max, input_min, input_max = prepare_mosaiq_pca_data(
         dataset, target_size=target_size, pca_components=pca_dims
     )
 
@@ -623,7 +627,7 @@ def create_mosaiq_pca_loaders(
             pin_memory=pin_memory,
         )
 
-    return loaders, tensor_pca, labels, pca
+    return loaders, tensor_pca, labels, pca, pca_min, pca_max, input_min, input_max
 
 
 class MosaiqDiscriminator(nn.Module):
