@@ -312,7 +312,7 @@ def evaluate_balancing_strategies(
         real_images.append(images)
         real_labels.append(labels)
     real_images_t = torch.cat(real_images)
-    real_labels_t = torch.cat(real_labels)
+    real_labels_t = torch.cat(real_labels).view(-1).long()
 
     num_pos = (real_labels_t == 1).sum().item()
     num_neg = (real_labels_t == 0).sum().item()
@@ -335,7 +335,7 @@ def evaluate_balancing_strategies(
 
     if synth_images:
         synth_images_t = torch.cat(synth_images)
-        synth_labels_t = torch.cat(synth_labels)
+        synth_labels_t = torch.cat(synth_labels).view(-1)
         balanced_images = torch.cat([real_images_t, synth_images_t])
         balanced_labels = torch.cat([real_labels_t, synth_labels_t])
     else:
@@ -365,7 +365,7 @@ def vary_synth_ratio(
         real_images.append(images)
         real_labels.append(labels)
     real_images_t = torch.cat(real_images)
-    real_labels_t = torch.cat(real_labels)
+    real_labels_t = torch.cat(real_labels).view(-1).long()
 
     total_real = len(real_labels_t)
     gen_device = next(generator.parameters()).device
