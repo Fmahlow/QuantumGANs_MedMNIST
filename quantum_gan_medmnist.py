@@ -216,7 +216,7 @@ def train_quantum_gan(
     hist_d: List[float] = []
     hist_g: List[float] = []
 
-    for _ in range(epochs):
+    for epoch in range(epochs):
         epoch_loss_d = 0.0
         epoch_loss_g = 0.0
 
