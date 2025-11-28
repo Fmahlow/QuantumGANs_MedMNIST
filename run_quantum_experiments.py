@@ -166,8 +166,12 @@ def build_patch_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
 
 
 def build_mosaiq_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
-    patch_size = 2 ** (cfg.latent_dim - cfg.n_a_qubits)
-    n_generators = (cfg.target_img_size ** 2) // patch_size
+    if cfg.pca_dims % cfg.latent_dim != 0:
+        raise ValueError(
+            "MOSAIQ requer que pca_dims seja divisível por latent_dim para alinhar as dimensões"
+        )
+
+    n_generators = cfg.pca_dims // cfg.latent_dim
     device_kwargs: Dict[str, object] = {}
     if cfg.qml_batch_obs is not None:
         device_kwargs["batch_obs"] = cfg.qml_batch_obs
