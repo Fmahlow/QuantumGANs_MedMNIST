@@ -609,7 +609,7 @@ def run_experiments(cfg: RunConfig) -> None:
     save_average_csv(
         balance_rows,
         csv_path("average_quantum_balancing_strategies"),
-        ["Model", "Strategy", "Ratio"],
+        ["Model", "Strategy"],
     )
     save_average_csv(
         ratio_bal_rows,
