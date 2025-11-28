@@ -267,16 +267,24 @@ def evaluate_fid_is(
     fid = FrechetInceptionDistance(normalize=True).to(device)
     inception = InceptionScore(normalize=True).to(device)
 
+    def ensure_three_channels(imgs: torch.Tensor) -> torch.Tensor:
+        """Replicate single-channel images to match Inception's RGB expectation."""
+
+        if imgs.size(1) == 1:
+            return imgs.repeat(1, 3, 1, 1)
+        return imgs
+
     # acumula amostras reais
     for batch, _ in real_loader:
-        fid.update(batch.to(device), real=True)
+        batch = ensure_three_channels(batch.to(device))
+        fid.update(batch, real=True)
 
     generator.eval()
     synth_batches = []
     with torch.no_grad():
         for _ in range(10):
             noise = torch.rand(cfg.batch_size, cfg.latent_dim, device=device) * (torch.pi / 2)
-            fake = generator(noise).to(device)
+            fake = ensure_three_channels(generator(noise).to(device))
             synth_batches.append(fake)
             fid.update(fake, real=False)
             inception.update(fake)
