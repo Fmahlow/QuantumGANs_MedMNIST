@@ -94,6 +94,10 @@ class MosaiqPCA:
     mean_: np.ndarray
     min_: float
     max_: float
+    pca_min_: float
+    pca_max_: float
+    input_min_: float
+    input_max_: float
     pca_model: object
 
 
@@ -211,7 +215,16 @@ def prepare_data(cfg: RunConfig) -> DataBundle:
     # MOSAIQ usa PCA sobre as imagens já reescaladas
     dataset_class = med_data.train_dataset.__class__
     highres_train = dataset_class(split="train", transform=transform, download=True)
-    loaders, tensor_pca, labels, pca_model = create_mosaiq_pca_loaders(
+    (
+        loaders,
+        tensor_pca,
+        labels,
+        pca_model,
+        pca_min,
+        pca_max,
+        input_min,
+        input_max,
+    ) = create_mosaiq_pca_loaders(
         highres_train,
         batch_size=cfg.batch_size,
         target_size=cfg.target_img_size,
@@ -224,6 +237,10 @@ def prepare_data(cfg: RunConfig) -> DataBundle:
         mean_=getattr(pca_model, "mean_", np.zeros(cfg.pca_dims)),
         min_=float(tensor_pca.min().item()),
         max_=float(tensor_pca.max().item()),
+        pca_min_=pca_min,
+        pca_max_=pca_max,
+        input_min_=input_min,
+        input_max_=input_max,
         pca_model=pca_model,
     )
 
@@ -257,6 +274,48 @@ def save_average_csv(rows: List[Dict[str, object]], path: Path, group_keys: List
     ]
     grouped = df.groupby(group_keys)[numeric_cols].mean().reset_index()
     grouped.to_csv(path, index=False)
+
+
+def reverse_scale_data(
+    data: np.ndarray, orig_min: float, orig_max: float, scale: Tuple[float, float] = (-1.0, 1.0)
+) -> np.ndarray:
+    if len(scale) != 2:
+        raise ValueError("scale must contain exactly two elements: (min, max)")
+
+    a, b = float(scale[0]), float(scale[1])
+    if np.isclose(orig_max, orig_min):
+        return np.full_like(data, (orig_min + orig_max) / 2.0)
+
+    return ((data - a) / (b - a)) * (orig_max - orig_min) + orig_min
+
+
+def mosaiq_pca_to_images(pca_tensor: torch.Tensor, mosaiq: MosaiqPCA, cfg: RunConfig) -> torch.Tensor:
+    pca_np = pca_tensor.detach().cpu().numpy()
+    unscaled_pca = reverse_scale_data(pca_np, mosaiq.pca_min_, mosaiq.pca_max_)
+    reconstructed = mosaiq.pca_model.inverse_transform(unscaled_pca)
+    rescaled_inputs = reverse_scale_data(
+        reconstructed, mosaiq.input_min_, mosaiq.input_max_, scale=(0.0, 1.0)
+    )
+    rescaled_inputs = np.clip(rescaled_inputs, 0.0, 1.0)
+
+    images = torch.from_numpy(rescaled_inputs).float()
+    images = images.view(-1, cfg.img_channels, cfg.target_img_size, cfg.target_img_size)
+    normalized = torch.clamp(images * 2.0 - 1.0, -1.0, 1.0)
+    return normalized
+
+
+class MosaiqImageGenerator(nn.Module):
+    def __init__(self, generator: nn.Module, mosaiq: MosaiqPCA, cfg: RunConfig) -> None:
+        super().__init__()
+        self.generator = generator
+        self.mosaiq = mosaiq
+        self.cfg = cfg
+
+    def forward(self, noise: torch.Tensor) -> torch.Tensor:  # type: ignore[override]
+        gen_device = next(self.generator.parameters()).device
+        noise = noise.to(gen_device)
+        pca_out = self.generator(noise)
+        return mosaiq_pca_to_images(pca_out, self.mosaiq, self.cfg)
 
 
 def evaluate_fid_is(
@@ -582,7 +641,8 @@ def run_experiments(cfg: RunConfig) -> None:
             device=str(device),
             progress_callback=make_epoch_callback("mosaiq", cfg.gan_epochs),
         )
-        avg_inf = measure_inference_latency(mos_gen, cfg, device)
+        mosaiq_img_gen = MosaiqImageGenerator(mos_gen, mosaiq, cfg)
+        avg_inf = measure_inference_latency(mosaiq_img_gen, cfg, device)
         summary_rows.append(
             {
                 "Model": "mosaiq",
@@ -591,6 +651,52 @@ def run_experiments(cfg: RunConfig) -> None:
                 "Params": count_parameters(mos_gen),
                 "Inference_time_per_img_sec": avg_inf,
             }
+        )
+
+        fid_rows.append(
+            {
+                "Model": "mosaiq",
+                "Run": run_idx,
+                **evaluate_fid_is(data_bundle.test_loader, mosaiq_img_gen, cfg, device),
+            }
+        )
+
+        balance_rows.extend(
+            evaluate_balancing_strategies(
+                data_bundle.train_loader,
+                mosaiq_img_gen,
+                data_bundle.test_loader,
+                cfg,
+                device,
+                "mosaiq",
+                run_idx,
+            )
+        )
+
+        ratio_bal_rows.extend(
+            vary_synth_ratio(
+                data_bundle.train_loader,
+                mosaiq_img_gen,
+                data_bundle.test_loader,
+                cfg,
+                device,
+                preserve_original_ratio=False,
+                model_name="mosaiq",
+                run_idx=run_idx,
+            )
+        )
+
+        ratio_orig_rows.extend(
+            vary_synth_ratio(
+                data_bundle.train_loader,
+                mosaiq_img_gen,
+                data_bundle.test_loader,
+                cfg,
+                device,
+                preserve_original_ratio=True,
+                model_name="mosaiq",
+                run_idx=run_idx,
+            )
         )
 
         progress.step(time.perf_counter() - iter_start)
