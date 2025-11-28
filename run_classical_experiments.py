@@ -398,8 +398,9 @@ def compute_fid_is(
     isc = InceptionScore(normalize=True).to(device)  # instancia IS
 
     collected = 0  # contador de amostras
+    denorm = lambda batch: ((batch + 1) / 2).clamp(0, 1)  # converte de [-1,1] para [0,1]
     for images, _ in real_loader:  # acumula estatísticas reais
-        batch = images.to(device).repeat(1, 3, 1, 1)  # duplica canais para 3
+        batch = denorm(images.to(device)).repeat(1, 3, 1, 1)  # duplica canais para 3
         fid.update(batch, real=True)  # atualiza FID real
         collected += batch.size(0)  # soma amostras
         if collected >= num_images:  # limita quantidade
@@ -410,7 +411,7 @@ def compute_fid_is(
         current = min(cfg.batch_size, remaining)  # define tamanho do lote
         labels = torch.randint(0, cfg.num_classes, (current,), device=device)  # labels aleatórias
         fake = generate_synthetic(generator, labels.cpu(), cfg, device).to(device)  # gera lote
-        batch = fake.repeat(1, 3, 1, 1)  # ajusta canais
+        batch = denorm(fake).repeat(1, 3, 1, 1)  # ajusta canais e faixa
         fid.update(batch, real=False)  # atualiza FID fake
         isc.update(batch)  # atualiza IS
         remaining -= current  # decrementa contador
@@ -531,20 +532,21 @@ def main() -> None:
     ratio_bal_rows: List[Dict[str, float]] = []  # CSV 4: rácios mantendo balanceamento
     ratio_orig_rows: List[Dict[str, float]] = []  # CSV 5: rácios mantendo proporção original
 
-    balance_rows.extend(
-        evaluate_balancing_strategies(
-            data_bundle.train_loader,
-            generator=None,
-            test_loader=data_bundle.test_loader,
-            cfg=cfg,
-            device=device,
-            model_name="baseline",
-            run_idx=0,
-            include_classical=True,
-        )
-    )
-
     progress = ProgressTracker(total_steps=cfg.repeats * 3)  # três modelos
+
+    for run_idx in range(cfg.repeats):  # repetições das baselines clássicas
+        balance_rows.extend(
+            evaluate_balancing_strategies(
+                data_bundle.train_loader,
+                generator=None,
+                test_loader=data_bundle.test_loader,
+                cfg=cfg,
+                device=device,
+                model_name="baseline",
+                run_idx=run_idx,
+                include_classical=True,
+            )
+        )
 
     for model_name in ("dcgan", "cgan", "wgan"):  # percorre modelos
         for run_idx in range(cfg.repeats):  # repetições
