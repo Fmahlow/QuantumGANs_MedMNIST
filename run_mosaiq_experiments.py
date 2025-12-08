@@ -9,9 +9,8 @@ from pathlib import Path
 from typing import Dict, List
 
 import torch
-from torch.utils.data import DataLoader
-
 from run_quantum_experiments import (
+    LabelledMosaiqImageGenerator,
     MosaiqImageGenerator,
     ProgressTracker,
     RunConfig,
@@ -51,7 +50,7 @@ def run_mosaiq_experiments(cfg: RunConfig) -> None:
 
     progress = ProgressTracker(total_steps=cfg.repeats)
 
-    def make_epoch_callback(total_epochs: int):
+    def make_epoch_callback(name: str, total_epochs: int):
         epoch_tracker = ProgressTracker(total_epochs)
         last = time.perf_counter()
 
@@ -61,7 +60,7 @@ def run_mosaiq_experiments(cfg: RunConfig) -> None:
             epoch_tracker.step(now - last)
             last = now
             print(
-                f"[mosaiq] Epoch {epoch}/{total_epochs} "
+                f"[{name}] Epoch {epoch}/{total_epochs} "
                 f"D_loss={loss_d:.4f} G_loss={loss_g:.4f}",
                 flush=True,
             )
@@ -71,28 +70,31 @@ def run_mosaiq_experiments(cfg: RunConfig) -> None:
     for run_idx in range(cfg.repeats):
         iter_start = time.perf_counter()
         mosaiq = data_bundle.mosaiq
-        mos_gen, mos_disc = build_mosaiq_models(cfg)
-        combined_loader = DataLoader(
-            mosaiq.pca_data,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-        )
-        (_, _), train_time = timed(train_mosaiq_gan)(
-            combined_loader,
-            mos_gen,
-            mos_disc,
-            epochs=cfg.gan_epochs,
-            device=str(device),
-            progress_callback=make_epoch_callback(cfg.gan_epochs),
-        )
-        mosaiq_img_gen = MosaiqImageGenerator(mos_gen, mosaiq, cfg)
+        label_generators: Dict[int, MosaiqImageGenerator] = {}
+        total_train_time = 0.0
+        for label, loader in mosaiq.loaders.items():
+            mos_gen, mos_disc = build_mosaiq_models(cfg)
+            (_, _), train_time = timed(train_mosaiq_gan)(
+                loader,
+                mos_gen,
+                mos_disc,
+                epochs=cfg.gan_epochs,
+                device=str(device),
+                progress_callback=make_epoch_callback(
+                    f"mosaiq_label_{label}", cfg.gan_epochs
+                ),
+            )
+            total_train_time += train_time
+            label_generators[label] = MosaiqImageGenerator(mos_gen, mosaiq, cfg)
+
+        mosaiq_img_gen = LabelledMosaiqImageGenerator(label_generators)
         avg_inf = measure_inference_latency(mosaiq_img_gen, cfg, device)
         summary_rows.append(
             {
                 "Model": "mosaiq",
                 "Run": run_idx,
-                "Train_time_sec": train_time,
-                "Params": count_parameters(mos_gen),
+                "Train_time_sec": total_train_time,
+                "Params": count_parameters(mosaiq_img_gen),
                 "Inference_time_per_img_sec": avg_inf,
             }
         )
@@ -189,6 +191,7 @@ def parse_args() -> RunConfig:
     parser.add_argument("--n-a-qubits", type=int, default=1)
     parser.add_argument("--q-depth", type=int, default=6)
     parser.add_argument("--pca-dims", type=int, default=40)
+    parser.add_argument("--mosaiq-batch-size", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("experiments_outputs"))
     parser.add_argument("--qml-backend", type=str, default="lightning.qubit")
@@ -213,6 +216,7 @@ def parse_args() -> RunConfig:
         n_a_qubits=args.n_a_qubits,
         q_depth=args.q_depth,
         pca_dims=args.pca_dims,
+        mosaiq_batch_size=args.mosaiq_batch_size,
         repeats=args.repeats,
         output_dir=args.output_dir,
         qml_backend=args.qml_backend,

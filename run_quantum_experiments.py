@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from sklearn import metrics
-from torch.utils.data import DataLoader, Dataset, TensorDataset
+from torch.utils.data import DataLoader, Dataset, Subset, TensorDataset
 from torchvision import models
 from torchvision import transforms
 
@@ -70,6 +70,7 @@ class RunConfig:
     gan_epochs: int = 50
     clf_epochs: int = 3
     batch_size: int = 128
+    mosaiq_batch_size: int = 8
     num_workers: int = 0
     repeats: int = 1
     synth_ratio_grid: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.5)
@@ -107,6 +108,7 @@ class DataBundle:
     test_loader: DataLoader
     train_dataset: Dataset
     test_dataset: Dataset
+    label_loaders: Dict[int, DataLoader]
     mosaiq: Optional[MosaiqPCA] = None
 
     @property
@@ -194,6 +196,36 @@ def build_mosaiq_models(cfg: RunConfig) -> Tuple[nn.Module, nn.Module]:
     return generator, discriminator
 
 
+def create_label_image_loaders(
+    dataset: Dataset,
+    *,
+    batch_size: int,
+    num_workers: int,
+    pin_memory: bool = False,
+    drop_last: bool = False,
+    shuffle: bool = True,
+) -> Dict[int, DataLoader]:
+    """Create per-label dataloaders mirroring the notebook's class-wise training."""
+
+    labels = torch.as_tensor(getattr(dataset, "labels")).view(-1).long()
+    unique_labels = torch.unique(labels).tolist()
+
+    loaders: Dict[int, DataLoader] = {}
+    for label in sorted(int(l) for l in unique_labels):
+        indices = torch.nonzero(labels == label, as_tuple=False).squeeze(1)
+        subset = Subset(dataset, indices.tolist())
+        loaders[label] = DataLoader(
+            subset,
+            batch_size=batch_size,
+            shuffle=shuffle,
+            num_workers=num_workers,
+            pin_memory=pin_memory,
+            drop_last=drop_last,
+        )
+
+    return loaders
+
+
 def prepare_data(cfg: RunConfig) -> DataBundle:
     transform = transforms.Compose(
         [
@@ -212,6 +244,15 @@ def prepare_data(cfg: RunConfig) -> DataBundle:
         pin_memory=False,
     )
 
+    label_loaders = create_label_image_loaders(
+        med_data.train_dataset,
+        batch_size=cfg.batch_size,
+        num_workers=cfg.num_workers,
+        pin_memory=False,
+        drop_last=False,
+        shuffle=True,
+    )
+
     # MOSAIQ usa PCA sobre as imagens já reescaladas
     dataset_class = med_data.train_dataset.__class__
     highres_train = dataset_class(split="train", transform=transform, download=True)
@@ -226,7 +267,7 @@ def prepare_data(cfg: RunConfig) -> DataBundle:
         input_max,
     ) = create_mosaiq_pca_loaders(
         highres_train,
-        batch_size=cfg.batch_size,
+        batch_size=cfg.mosaiq_batch_size,
         target_size=cfg.target_img_size,
         pca_dims=cfg.pca_dims,
     )
@@ -249,6 +290,7 @@ def prepare_data(cfg: RunConfig) -> DataBundle:
         test_loader=med_data.test_loader,
         train_dataset=med_data.train_dataset,
         test_dataset=med_data.test_dataset,
+        label_loaders=label_loaders,
         mosaiq=mosaiq,
     )
 
@@ -318,6 +360,78 @@ class MosaiqImageGenerator(nn.Module):
         return mosaiq_pca_to_images(pca_out, self.mosaiq, self.cfg)
 
 
+class LabelledMosaiqImageGenerator(nn.Module):
+    """Agrupa geradores MOSAIQ treinados por rótulo e suporta amostragem condicionada."""
+
+    supports_labels = True
+
+    def __init__(self, generators: Dict[int, MosaiqImageGenerator]) -> None:
+        super().__init__()
+        self.generators = nn.ModuleDict({str(label): gen for label, gen in generators.items()})
+        self.labels = sorted(generators.keys())
+
+    def forward(
+        self, noise: torch.Tensor, labels: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:  # type: ignore[override]
+        if labels is None:
+            labels = self._balanced_labels(noise.size(0), device=noise.device)
+
+        outputs: List[torch.Tensor] = []
+        for label in self.labels:
+            mask = labels == label
+            if not torch.any(mask):
+                continue
+            label_noise = noise[mask]
+            gen = self.generators[str(label)]
+            outputs.append(gen(label_noise))
+
+        if not outputs:
+            raise ValueError("Nenhuma amostra foi gerada; verifique os rótulos fornecidos.")
+
+        return torch.cat(outputs, dim=0)
+
+    def _balanced_labels(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        reps = int(np.ceil(batch_size / max(len(self.labels), 1)))
+        tiled = torch.tensor(self.labels, device=device).repeat(reps)[:batch_size]
+        return tiled
+
+
+class LabelledPatchImageGenerator(nn.Module):
+    """Agrupa geradores PatchQGAN treinados por rótulo e suporta amostragem condicionada."""
+
+    supports_labels = True
+
+    def __init__(self, generators: Dict[int, nn.Module]) -> None:
+        super().__init__()
+        self.generators = nn.ModuleDict({str(label): gen for label, gen in generators.items()})
+        self.labels = sorted(generators.keys())
+
+    def forward(
+        self, noise: torch.Tensor, labels: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:  # type: ignore[override]
+        if labels is None:
+            labels = self._balanced_labels(noise.size(0), device=noise.device)
+
+        outputs: List[torch.Tensor] = []
+        for label in self.labels:
+            mask = labels == label
+            if not torch.any(mask):
+                continue
+            label_noise = noise[mask]
+            gen = self.generators[str(label)]
+            outputs.append(gen(label_noise))
+
+        if not outputs:
+            raise ValueError("Nenhuma amostra foi gerada; verifique os rótulos fornecidos.")
+
+        return torch.cat(outputs, dim=0)
+
+    def _balanced_labels(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        reps = int(np.ceil(batch_size / max(len(self.labels), 1)))
+        tiled = torch.tensor(self.labels, device=device).repeat(reps)[:batch_size]
+        return tiled
+
+
 def evaluate_fid_is(
     real_loader: Iterable,
     generator: nn.Module,
@@ -357,6 +471,16 @@ def evaluate_fid_is(
     return {"FID": fid_score, "IS_mean": float(is_mean), "IS_std": float(is_std)}
 
 
+def _generate_with_label(
+    generator: nn.Module, noise: torch.Tensor, label: Optional[int]
+) -> torch.Tensor:
+    if label is None or not getattr(generator, "supports_labels", False):
+        return generator(noise)
+
+    labels = torch.full((noise.size(0),), label, dtype=torch.long, device=noise.device)
+    return generator(noise, labels=labels)
+
+
 def evaluate_balancing_strategies(
     real_loader: Iterable,
     generator: nn.Module,
@@ -388,12 +512,12 @@ def evaluate_balancing_strategies(
     if needed_pos > 0:
         labels = torch.ones(needed_pos, dtype=torch.long)
         noise = torch.rand(needed_pos, cfg.latent_dim, device=gen_device) * (torch.pi / 2)
-        synth_images.append(generator(noise).cpu())
+        synth_images.append(_generate_with_label(generator, noise, 1).cpu())
         synth_labels.append(labels)
     if needed_neg > 0:
         labels = torch.zeros(needed_neg, dtype=torch.long)
         noise = torch.rand(needed_neg, cfg.latent_dim, device=gen_device) * (torch.pi / 2)
-        synth_images.append(generator(noise).cpu())
+        synth_images.append(_generate_with_label(generator, noise, 0).cpu())
         synth_labels.append(labels)
 
     if synth_images:
@@ -440,11 +564,11 @@ def vary_synth_ratio(
         half = synth_total // 2
 
         noise = torch.rand(half, cfg.latent_dim, device=gen_device) * (torch.pi / 2)
-        synth_images.append(generator(noise).cpu())
+        synth_images.append(_generate_with_label(generator, noise, 0).cpu())
         synth_labels.append(torch.zeros(half, dtype=torch.long))
 
         noise = torch.rand(synth_total - half, cfg.latent_dim, device=gen_device) * (torch.pi / 2)
-        synth_images.append(generator(noise).cpu())
+        synth_images.append(_generate_with_label(generator, noise, 1).cpu())
         synth_labels.append(torch.ones(synth_total - half, dtype=torch.long))
 
         mixed_images = torch.cat([real_images_t, torch.cat(synth_images)])
@@ -558,22 +682,31 @@ def run_experiments(cfg: RunConfig) -> None:
     for run_idx in range(cfg.repeats):
         # PatchQGAN
         iter_start = time.perf_counter()
-        patch_gen, patch_disc = build_patch_models(cfg)
-        (patch_hist, _), train_time = timed(train_quantum_gan)(
-            data_bundle.train_loader,
-            patch_gen,
-            patch_disc,
-            epochs=cfg.gan_epochs,
-            device=str(device),
-            progress_callback=make_epoch_callback("patchqgan", cfg.gan_epochs),
-        )
-        avg_inf = measure_inference_latency(patch_gen, cfg, device)
+        label_generators: Dict[int, nn.Module] = {}
+        total_train_time = 0.0
+        for label, loader in data_bundle.label_loaders.items():
+            patch_gen, patch_disc = build_patch_models(cfg)
+            (patch_hist, _), train_time = timed(train_quantum_gan)(
+                loader,
+                patch_gen,
+                patch_disc,
+                epochs=cfg.gan_epochs,
+                device=str(device),
+                progress_callback=make_epoch_callback(
+                    f"patchqgan_label_{label}", cfg.gan_epochs
+                ),
+            )
+            total_train_time += train_time
+            label_generators[label] = patch_gen
+
+        patch_img_gen = LabelledPatchImageGenerator(label_generators)
+        avg_inf = measure_inference_latency(patch_img_gen, cfg, device)
         summary_rows.append(
             {
                 "Model": "patchqgan",
                 "Run": run_idx,
-                "Train_time_sec": train_time,
-                "Params": count_parameters(patch_gen),
+                "Train_time_sec": total_train_time,
+                "Params": count_parameters(patch_img_gen),
                 "Inference_time_per_img_sec": avg_inf,
             }
         )
@@ -581,13 +714,13 @@ def run_experiments(cfg: RunConfig) -> None:
             {
                 "Model": "patchqgan",
                 "Run": run_idx,
-                **evaluate_fid_is(data_bundle.test_loader, patch_gen, cfg, device),
+                **evaluate_fid_is(data_bundle.test_loader, patch_img_gen, cfg, device),
             }
         )
         balance_rows.extend(
             evaluate_balancing_strategies(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
@@ -598,7 +731,7 @@ def run_experiments(cfg: RunConfig) -> None:
         ratio_bal_rows.extend(
             vary_synth_ratio(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
@@ -610,7 +743,7 @@ def run_experiments(cfg: RunConfig) -> None:
         ratio_orig_rows.extend(
             vary_synth_ratio(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
@@ -627,28 +760,29 @@ def run_experiments(cfg: RunConfig) -> None:
             continue
         iter_start = time.perf_counter()
         mosaiq = data_bundle.mosaiq
-        mos_gen, mos_disc = build_mosaiq_models(cfg)
-        combined_loader = DataLoader(
-            mosaiq.pca_data,
-            batch_size=cfg.batch_size,
-            shuffle=True,
-        )
-        (_, _), train_time = timed(train_mosaiq_gan)(
-            combined_loader,
-            mos_gen,
-            mos_disc,
-            epochs=cfg.gan_epochs,
-            device=str(device),
-            progress_callback=make_epoch_callback("mosaiq", cfg.gan_epochs),
-        )
-        mosaiq_img_gen = MosaiqImageGenerator(mos_gen, mosaiq, cfg)
+        label_generators: Dict[int, MosaiqImageGenerator] = {}
+        total_train_time = 0.0
+        for label, loader in mosaiq.loaders.items():
+            mos_gen, mos_disc = build_mosaiq_models(cfg)
+            (_, _), train_time = timed(train_mosaiq_gan)(
+                loader,
+                mos_gen,
+                mos_disc,
+                epochs=cfg.gan_epochs,
+                device=str(device),
+                progress_callback=make_epoch_callback(f"mosaiq_label_{label}", cfg.gan_epochs),
+            )
+            total_train_time += train_time
+            label_generators[label] = MosaiqImageGenerator(mos_gen, mosaiq, cfg)
+
+        mosaiq_img_gen = LabelledMosaiqImageGenerator(label_generators)
         avg_inf = measure_inference_latency(mosaiq_img_gen, cfg, device)
         summary_rows.append(
             {
                 "Model": "mosaiq",
                 "Run": run_idx,
-                "Train_time_sec": train_time,
-                "Params": count_parameters(mos_gen),
+                "Train_time_sec": total_train_time,
+                "Params": count_parameters(mosaiq_img_gen),
                 "Inference_time_per_img_sec": avg_inf,
             }
         )
@@ -745,6 +879,7 @@ def parse_args() -> RunConfig:
     parser.add_argument("--n-a-qubits", type=int, default=1)
     parser.add_argument("--q-depth", type=int, default=6)
     parser.add_argument("--pca-dims", type=int, default=40)
+    parser.add_argument("--mosaiq-batch-size", type=int, default=8)
     parser.add_argument("--repeats", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, default=Path("experiments_outputs"))
     parser.add_argument("--qml-backend", type=str, default="lightning.qubit")
@@ -769,6 +904,7 @@ def parse_args() -> RunConfig:
         n_a_qubits=args.n_a_qubits,
         q_depth=args.q_depth,
         pca_dims=args.pca_dims,
+        mosaiq_batch_size=args.mosaiq_batch_size,
         repeats=args.repeats,
         output_dir=args.output_dir,
         qml_backend=args.qml_backend,

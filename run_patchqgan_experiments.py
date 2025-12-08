@@ -13,6 +13,7 @@ import torch
 from run_quantum_experiments import (
     ProgressTracker,
     RunConfig,
+    LabelledPatchImageGenerator,
     build_patch_models,
     count_parameters,
     evaluate_balancing_strategies,
@@ -65,22 +66,29 @@ def run_patch_experiments(cfg: RunConfig) -> None:
 
     for run_idx in range(cfg.repeats):
         iter_start = time.perf_counter()
-        patch_gen, patch_disc = build_patch_models(cfg)
-        (_, _), train_time = timed(train_quantum_gan)(
-            data_bundle.train_loader,
-            patch_gen,
-            patch_disc,
-            epochs=cfg.gan_epochs,
-            device=str(device),
-            progress_callback=make_epoch_callback(cfg.gan_epochs),
-        )
-        avg_inf = measure_inference_latency(patch_gen, cfg, device)
+        label_generators: Dict[int, torch.nn.Module] = {}
+        total_train_time = 0.0
+        for label, loader in data_bundle.label_loaders.items():
+            patch_gen, patch_disc = build_patch_models(cfg)
+            (_, _), train_time = timed(train_quantum_gan)(
+                loader,
+                patch_gen,
+                patch_disc,
+                epochs=cfg.gan_epochs,
+                device=str(device),
+                progress_callback=make_epoch_callback(cfg.gan_epochs),
+            )
+            total_train_time += train_time
+            label_generators[label] = patch_gen
+
+        patch_img_gen = LabelledPatchImageGenerator(label_generators)
+        avg_inf = measure_inference_latency(patch_img_gen, cfg, device)
         summary_rows.append(
             {
                 "Model": "patchqgan",
                 "Run": run_idx,
-                "Train_time_sec": train_time,
-                "Params": count_parameters(patch_gen),
+                "Train_time_sec": total_train_time,
+                "Params": count_parameters(patch_img_gen),
                 "Inference_time_per_img_sec": avg_inf,
             }
         )
@@ -88,13 +96,13 @@ def run_patch_experiments(cfg: RunConfig) -> None:
             {
                 "Model": "patchqgan",
                 "Run": run_idx,
-                **evaluate_fid_is(data_bundle.test_loader, patch_gen, cfg, device),
+                **evaluate_fid_is(data_bundle.test_loader, patch_img_gen, cfg, device),
             }
         )
         balance_rows.extend(
             evaluate_balancing_strategies(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
@@ -105,7 +113,7 @@ def run_patch_experiments(cfg: RunConfig) -> None:
         ratio_bal_rows.extend(
             vary_synth_ratio(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
@@ -117,7 +125,7 @@ def run_patch_experiments(cfg: RunConfig) -> None:
         ratio_orig_rows.extend(
             vary_synth_ratio(
                 data_bundle.train_loader,
-                patch_gen,
+                patch_img_gen,
                 data_bundle.test_loader,
                 cfg,
                 device,
