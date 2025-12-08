@@ -1,0 +1,34 @@
+{
+  "data_flag": "breastmnist",
+  "latent_dim": 100,
+  "gan_epochs": 50,
+  "classifier_epochs": 1,
+  "num_gan_runs": 10,
+  "num_generation_runs": 6,
+  "num_classifier_runs": 10,
+  "classifier_batch_size": 64,
+  "data_batch_size": 128,
+  "device": "cuda",
+  "base_seed": 2024,
+  "real_class0_count": 147,
+  "real_class1_count": 399,
+  "synthetic_needed_for_balance": 252,
+  "total_real_samples": 546,
+  "strategies": [
+    "ResNet sem balanceamento",
+    "DCGAN (classe 0)",
+    "CGAN (classe 0)",
+    "WGAN-GP (classe 0)",
+    "SMOTE (classe 0)",
+    "Oversampling por repetição (classe 0)"
+  ],
+  "synthetic_ratios": [
+    0.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.5
+  ],
+  "timestamp": "2025-11-26T21:17:28Z"
+}

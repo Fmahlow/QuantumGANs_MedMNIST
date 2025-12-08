@@ -1,0 +1,29 @@
+{
+  "data_flag": "breastmnist",
+  "latent_dim": 5,
+  "img_channels": 1,
+  "num_classes": 2,
+  "gan_epochs": 50,
+  "clf_epochs": 3,
+  "batch_size": 128,
+  "num_workers": 0,
+  "repeats": 1,
+  "synth_ratio_grid": [
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.5
+  ],
+  "balance_ratio": 0.5,
+  "target_img_size": 8,
+  "n_a_qubits": 1,
+  "q_depth": 6,
+  "pca_dims": 40,
+  "output_dir": "experiments_outputs",
+  "qml_backend": "lightning.qubit",
+  "qml_diff_method": "parameter-shift",
+  "qml_batch_obs": null,
+  "qml_mpi": false,
+  "qml_circuit_device": null
+}

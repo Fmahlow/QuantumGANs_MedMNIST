@@ -1,0 +1,3 @@
+Model,Run,Train_time_sec,Params,Inference_time_per_img_sec
+patchqgan,0,21.795998523011804,120,0.03837620635749772
+mosaiq,0,1287.3402504241094,240,0.07771019136998802

@@ -1,0 +1,2 @@
+Model,Train_time_sec,Params,Inference_time_per_img_sec
+mosaiq,65114.903869899455,240.0,0.07750806800322607

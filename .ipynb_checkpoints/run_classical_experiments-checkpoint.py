@@ -1,3 +1,11 @@
+"""Orquestrador automatizado para todos os experimentos clássicos.
+
+O script consolida o fluxo que antes estava espalhado em quatro notebooks
+(``gans_classical_fid_is.ipynb``, ``gans_quantum_resources.ipynb``,
+``gans_classical_balance_class0.ipynb`` e ``gans_classical_original_balance.ipynb``),
+permitindo treinar as GANs clássicas, gerar imagens sintéticas, treinar
+classificadores e produzir os CSVs que alimentam o paper.
+"""
 from __future__ import annotations
 
 import argparse  # parser de argumentos de linha de comando
@@ -5,7 +13,7 @@ import json  # exportar configurações usadas
 import time  # medir tempos de execução
 from dataclasses import dataclass, asdict  # estruturas de configuração
 from pathlib import Path  # manipulação conveniente de caminhos
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 import numpy as np  # operações vetoriais usadas em métricas
 import torch  # base para treino e geração das GANs
@@ -30,27 +38,6 @@ from classical_gans import (  # arquiteturas e loops de treino existentes
 from medmnist_data import load_medmnist_data  # carregamento do dataset base
 
 
-class ProgressTracker:
-    """Controla o progresso para estimar tempo restante."""
-
-    def __init__(self, total_steps: int) -> None:
-        self.total_steps = total_steps
-        self.completed = 0
-        self.start_time = time.perf_counter()
-        self.accumulated = 0.0
-
-    def step(self, elapsed: float) -> None:
-        self.completed += 1
-        self.accumulated += elapsed
-        avg = self.accumulated / max(self.completed, 1)
-        remaining = max(self.total_steps - self.completed, 0) * avg
-        print(
-            f"[ETA] {self.completed}/{self.total_steps} etapas completas. "
-            f"Tempo médio {avg:.1f}s | Estimativa restante {remaining:.1f}s",
-            flush=True,
-        )
-
-
 @dataclass
 class RunConfig:
     """Configuração de alto nível para cada rodada de experimento."""
@@ -59,12 +46,12 @@ class RunConfig:
     latent_dim: int = 100  # dimensão do ruído para todas as GANs
     img_channels: int = 1  # número de canais do MedMNIST
     num_classes: int = 2  # quantidade de classes alvo
-    gan_epochs: int = 50  # épocas reduzidas para rodadas rápidas
+    gan_epochs: int = 5  # épocas reduzidas para rodadas rápidas
     clf_epochs: int = 3  # épocas do classificador de referência
     batch_size: int = 128  # tamanho de batch padrão
     num_workers: int = 0  # workers zero evita travamentos em ambientes simples
-    repeats: int = 5  # quantas vezes repetir cada GAN e classificador
-    synth_ratio_grid: Tuple[float, ...] = (0.25, 0.5, 0.75, 1.0, 1.5)  # rácios testados
+    repeats: int = 1  # quantas vezes repetir cada GAN e classificador
+    synth_ratio_grid: Tuple[float, ...] = (0.25, 0.5, 1.0)  # rácios testados
     balance_ratio: float = 0.5  # alvo de balanceamento 50/50
     output_dir: Path = Path("experiments_outputs")  # pasta para CSVs
 
@@ -110,28 +97,15 @@ def count_parameters(module: nn.Module) -> int:
 def measure_inference_latency(generator: nn.Module, cfg: RunConfig, device: torch.device) -> float:
     """Calcula tempo médio de inferência por imagem para o gerador."""
 
-    generator.eval()
-    batch_size = 32
-    noise = torch.randn(batch_size, cfg.latent_dim, 1, 1, device=device)
-
-    with torch.no_grad():
-        if isinstance(generator, CGANGenerator):
-            # gera labels dummy só pra medir tempo (por ex. aleatórias)
-            labels = torch.randint(0, cfg.num_classes, (batch_size,), device=device)
-            start = time.perf_counter()
-            images = generator(noise, labels)
-        else:
-            start = time.perf_counter()
-            images = generator(noise)
-
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-
-        elapsed = time.perf_counter() - start
-
-    per_image = elapsed / images.size(0)
-    return per_image
-
+    generator.eval()  # coloca em modo avaliação
+    noise = torch.randn(32, cfg.latent_dim, 1, 1, device=device)  # ruído fixo
+    with torch.no_grad():  # desativa gradiente
+        start = time.perf_counter()  # marca início
+        images = generator(noise)  # gera lote de imagens
+        torch.cuda.synchronize(device) if device.type == "cuda" else None  # garante finalização
+        elapsed = time.perf_counter() - start  # tempo decorrido
+    per_image = elapsed / images.size(0)  # tempo médio por amostra
+    return per_image  # devolve métrica
 
 
 def generate_synthetic(
@@ -276,66 +250,47 @@ def numpy_to_dataset(X: np.ndarray, y: np.ndarray, cfg: RunConfig) -> TensorData
 
 def evaluate_balancing_strategies(
     base_loader: Iterable,
-    generator: Optional[nn.Module],
+    generator: nn.Module,
     test_loader: DataLoader,
     cfg: RunConfig,
     device: torch.device,
-    model_name: str,
-    run_idx: int,
-    include_classical: bool = True,
 ) -> List[Dict[str, float]]:
     """Executa avaliação comparativa das estratégias de balanceamento."""
 
     X_real, y_real = prepare_flattened_dataset(base_loader, device)  # extrai base real
     rows: List[Dict[str, float]] = []  # acumula resultados
 
-    if include_classical:
-        real_dataset = numpy_to_dataset(X_real, y_real, cfg)  # dataset sem balanceamento
-        metrics_base, train_time = train_classifier(real_dataset, test_loader, cfg, device)  # métrica baseline
+    real_dataset = numpy_to_dataset(X_real, y_real, cfg)  # dataset sem balanceamento
+    metrics_base, train_time = train_classifier(real_dataset, test_loader, cfg, device)  # métrica baseline
+    rows.append({"Strategy": "None", **metrics_base, "Ratio": 0.0, "Synth": 0, "TrainTime": train_time})  # registra linha
+
+    for strategy in ("smote", "undersampling", "oversampling"):  # laço sobre técnicas clássicas
+        X_bal, y_bal = apply_sampling_strategy(X_real, y_real, strategy)  # aplica sampler
+        dataset_bal = numpy_to_dataset(X_bal, y_bal, cfg)  # cria dataset
+        metrics_bal, train_time = train_classifier(dataset_bal, test_loader, cfg, device)  # mede desempenho
+        synth_count = len(y_bal) - len(y_real)  # quantidade extra
         rows.append(
             {
-                "Model": model_name,
-                "Run": run_idx,
-                "Strategy": "None",
-                **metrics_base,
-                "Ratio": 0.0,
-                "Synth": 0,
-                "TrainTime": train_time,
-            }
-        )  # registra linha
-
-        for strategy in ("smote", "undersampling", "oversampling"):  # laço sobre técnicas clássicas
-            X_bal, y_bal = apply_sampling_strategy(X_real, y_real, strategy)  # aplica sampler
-            dataset_bal = numpy_to_dataset(X_bal, y_bal, cfg)  # cria dataset
-            metrics_bal, train_time = train_classifier(dataset_bal, test_loader, cfg, device)  # mede desempenho
-            synth_count = len(y_bal) - len(y_real)  # quantidade extra
-            rows.append(
-                {
-                    "Model": model_name,
-                    "Run": run_idx,
-                    "Strategy": strategy,
-                    **metrics_bal,
-                    "Ratio": cfg.balance_ratio,
-                    "Synth": synth_count,
-                    "TrainTime": train_time,
-                }
-            )
-
-    if generator is not None:
-        balanced_dataset = build_balanced_dataset(base_loader, generator, cfg, device)  # dataset via GAN
-        metrics_gan, train_time = train_classifier(balanced_dataset, test_loader, cfg, device)  # avalia
-        synth_count = len(balanced_dataset) - len(X_real)  # calcula extras
-        rows.append(
-            {
-                "Model": model_name,
-                "Run": run_idx,
-                "Strategy": "gan_balanced",
-                **metrics_gan,
+                "Strategy": strategy,
+                **metrics_bal,
                 "Ratio": cfg.balance_ratio,
                 "Synth": synth_count,
                 "TrainTime": train_time,
             }
         )
+
+    balanced_dataset = build_balanced_dataset(base_loader, generator, cfg, device)  # dataset via GAN
+    metrics_gan, train_time = train_classifier(balanced_dataset, test_loader, cfg, device)  # avalia
+    synth_count = len(balanced_dataset) - len(X_real)  # calcula extras
+    rows.append(
+        {
+            "Strategy": "gan_balanced",
+            **metrics_gan,
+            "Ratio": cfg.balance_ratio,
+            "Synth": synth_count,
+            "TrainTime": train_time,
+        }
+    )
     return rows  # devolve todas as linhas
 
 
@@ -346,8 +301,6 @@ def vary_synth_ratio(
     cfg: RunConfig,
     device: torch.device,
     preserve_original_ratio: bool,
-    model_name: str,
-    run_idx: int,
 ) -> List[Dict[str, float]]:
     """Avalia diferentes rácios de dados sintéticos mantendo ou não balanceamento."""
 
@@ -370,15 +323,7 @@ def vary_synth_ratio(
 
         dataset = TensorDataset(combined_images, combined_labels)  # dataset final
         metrics_row, train_time = train_classifier(dataset, test_loader, cfg, device)  # avalia
-        rows.append(
-            {
-                "Model": model_name,
-                "Run": run_idx,
-                "Ratio": ratio,
-                **metrics_row,
-                "TrainTime": train_time,
-            }
-        )  # registra linha
+        rows.append({"Ratio": ratio, **metrics_row, "TrainTime": train_time})  # registra linha
     return rows  # retorna experimentos
 
 
@@ -398,9 +343,8 @@ def compute_fid_is(
     isc = InceptionScore(normalize=True).to(device)  # instancia IS
 
     collected = 0  # contador de amostras
-    denorm = lambda batch: ((batch + 1) / 2).clamp(0, 1)  # converte de [-1,1] para [0,1]
     for images, _ in real_loader:  # acumula estatísticas reais
-        batch = denorm(images.to(device)).repeat(1, 3, 1, 1)  # duplica canais para 3
+        batch = images.to(device).repeat(1, 3, 1, 1)  # duplica canais para 3
         fid.update(batch, real=True)  # atualiza FID real
         collected += batch.size(0)  # soma amostras
         if collected >= num_images:  # limita quantidade
@@ -411,7 +355,7 @@ def compute_fid_is(
         current = min(cfg.batch_size, remaining)  # define tamanho do lote
         labels = torch.randint(0, cfg.num_classes, (current,), device=device)  # labels aleatórias
         fake = generate_synthetic(generator, labels.cpu(), cfg, device).to(device)  # gera lote
-        batch = denorm(fake).repeat(1, 3, 1, 1)  # ajusta canais e faixa
+        batch = fake.repeat(1, 3, 1, 1)  # ajusta canais
         fid.update(batch, real=False)  # atualiza FID fake
         isc.update(batch)  # atualiza IS
         remaining -= current  # decrementa contador
@@ -457,7 +401,7 @@ def train_single_gan(
         train_fn = lambda: train_wgangp(
             data_bundle.train_loader,
             G=generator,
-            D=discriminator,
+            critic=discriminator,
             latent_dim=cfg.latent_dim,
             num_epochs=cfg.gan_epochs,
             device=device,
@@ -485,23 +429,6 @@ def save_csv(rows: List[Dict[str, float]], path: Path) -> None:
     import pandas as pd  # carregamento tardio
 
     pd.DataFrame(rows).to_csv(path, index=False)  # exporta direto
-
-
-def save_average_csv(rows: List[Dict[str, float]], path: Path, group_keys: List[str]) -> None:
-    """Agrega colunas numéricas por chaves e salva versão média."""
-
-    import pandas as pd
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        df.to_csv(path, index=False)
-        return
-
-    numeric_cols = [
-        col for col in df.select_dtypes(include=["number"]).columns.tolist() if col not in group_keys and col != "Run"
-    ]
-    grouped = df.groupby(group_keys)[numeric_cols].mean().reset_index()
-    grouped.to_csv(path, index=False)
 
 
 def main() -> None:
@@ -532,25 +459,8 @@ def main() -> None:
     ratio_bal_rows: List[Dict[str, float]] = []  # CSV 4: rácios mantendo balanceamento
     ratio_orig_rows: List[Dict[str, float]] = []  # CSV 5: rácios mantendo proporção original
 
-    progress = ProgressTracker(total_steps=cfg.repeats * 3)  # três modelos
-
-    for run_idx in range(cfg.repeats):  # repetições das baselines clássicas
-        balance_rows.extend(
-            evaluate_balancing_strategies(
-                data_bundle.train_loader,
-                generator=None,
-                test_loader=data_bundle.test_loader,
-                cfg=cfg,
-                device=device,
-                model_name="baseline",
-                run_idx=run_idx,
-                include_classical=True,
-            )
-        )
-
     for model_name in ("dcgan", "cgan", "wgan"):  # percorre modelos
         for run_idx in range(cfg.repeats):  # repetições
-            iter_start = time.perf_counter()
             metrics_row = train_single_gan(model_name, data_bundle, cfg, device)  # executa treino
             summary_rows.append(
                 {
@@ -574,14 +484,7 @@ def main() -> None:
 
             balance_rows.extend(
                 evaluate_balancing_strategies(
-                    data_bundle.train_loader,
-                    generator,
-                    data_bundle.test_loader,
-                    cfg,
-                    device,
-                    model_name,
-                    run_idx,
-                    include_classical=False,
+                    data_bundle.train_loader, generator, data_bundle.test_loader, cfg, device
                 )
             )
             ratio_bal_rows.extend(
@@ -592,8 +495,6 @@ def main() -> None:
                     cfg,
                     device,
                     preserve_original_ratio=False,
-                    model_name=model_name,
-                    run_idx=run_idx,
                 )
             )
             ratio_orig_rows.extend(
@@ -604,43 +505,16 @@ def main() -> None:
                     cfg,
                     device,
                     preserve_original_ratio=True,
-                    model_name=model_name,
-                    run_idx=run_idx,
                 )
             )
 
-            progress.step(time.perf_counter() - iter_start)
+    save_csv(summary_rows, cfg.output_dir / "efficiency.csv")  # salva CSV 1
+    save_csv(fid_rows, cfg.output_dir / "synthetic_quality.csv")  # salva CSV 2
+    save_csv(balance_rows, cfg.output_dir / "balancing_strategies.csv")  # salva CSV 3
+    save_csv(ratio_bal_rows, cfg.output_dir / "balanced_ratios.csv")  # salva CSV 4
+    save_csv(ratio_orig_rows, cfg.output_dir / "original_ratio_with_synth.csv")  # salva CSV 5
 
-    def csv_path(base_name: str) -> Path:
-        return cfg.output_dir / f"{base_name}_{cfg.repeats}.csv"
-
-    save_csv(summary_rows, csv_path("classical_efficiency"))  # salva CSV 1
-    save_csv(fid_rows, csv_path("classical_synthetic_quality"))  # salva CSV 2
-    save_csv(balance_rows, csv_path("classical_balancing_strategies"))  # salva CSV 3
-    save_csv(ratio_bal_rows, csv_path("classical_balanced_ratios"))  # salva CSV 4
-    save_csv(ratio_orig_rows, csv_path("classical_original_ratio_with_synth"))  # salva CSV 5
-
-    save_average_csv(summary_rows, csv_path("average_classical_efficiency"), ["Model"])
-    save_average_csv(fid_rows, csv_path("average_classical_synthetic_quality"), ["Model"])
-    save_average_csv(
-        balance_rows,
-        csv_path("average_classical_balancing_strategies"),
-        ["Model", "Strategy"],
-    )
-    save_average_csv(
-        ratio_bal_rows,
-        csv_path("average_classical_balanced_ratios"),
-        ["Model", "Ratio"],
-    )
-    save_average_csv(
-        ratio_orig_rows,
-        csv_path("average_classical_original_ratio_with_synth"),
-        ["Model", "Ratio"],
-    )
-
-    cfg_dict = asdict(cfg)  # converte dataclass em dicionário simples
-    cfg_dict["output_dir"] = str(cfg.output_dir)  # transforma Path em string para JSON
-    (cfg.output_dir / "config_used.json").write_text(json.dumps(cfg_dict, indent=2))  # salva config
+    (cfg.output_dir / "config_used.json").write_text(json.dumps(asdict(cfg), indent=2))  # salva config
 
 
 if __name__ == "__main__":  # execução direta
