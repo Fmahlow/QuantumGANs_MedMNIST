@@ -441,34 +441,52 @@ def evaluate_fid_is(
     from torchmetrics.image.fid import FrechetInceptionDistance
     from torchmetrics.image.inception import InceptionScore
 
-    fid = FrechetInceptionDistance(normalize=True).to(device)
-    inception = InceptionScore(normalize=True).to(device)
-
-    def ensure_three_channels(imgs: torch.Tensor) -> torch.Tensor:
-        """Replicate single-channel images to match Inception's RGB expectation."""
-
+    def preprocess_for_inception(imgs: torch.Tensor) -> torch.Tensor:
+        imgs = ((imgs + 1) / 2).clamp(0, 1)
         if imgs.size(1) == 1:
-            return imgs.repeat(1, 3, 1, 1)
+            imgs = imgs.repeat(1, 3, 1, 1)
+        imgs = F.interpolate(imgs, size=(299, 299), mode="bilinear", align_corners=False)
         return imgs
 
-    # acumula amostras reais
-    for batch, _ in real_loader:
-        batch = ensure_three_channels(batch.to(device))
-        fid.update(batch, real=True)
-
     generator.eval()
-    synth_batches = []
-    with torch.no_grad():
-        for _ in range(10):
-            noise = torch.rand(cfg.batch_size, cfg.latent_dim, device=device) * (torch.pi / 2)
-            fake = ensure_three_channels(generator(noise).to(device))
-            synth_batches.append(fake)
-            fid.update(fake, real=False)
-            inception.update(fake)
+    fid_scores: List[float] = []
+    is_means: List[float] = []
+    is_stds: List[float] = []
 
-    fid_score = fid.compute().item()
-    is_mean, is_std = inception.compute()
-    return {"FID": fid_score, "IS_mean": float(is_mean), "IS_std": float(is_std)}
+    with torch.no_grad():
+        for label in range(cfg.num_classes):
+            fid = FrechetInceptionDistance(feature=64, normalize=True).to(device)
+            inception = InceptionScore(normalize=True).to(device)
+            has_samples = False
+
+            for real_batch, labels in real_loader:
+                mask = labels.view(-1) == label
+                if mask.sum() == 0:
+                    continue
+
+                real = preprocess_for_inception(real_batch[mask].to(device))
+                noise = torch.rand(real.size(0), cfg.latent_dim, device=device) * (torch.pi / 2)
+                fake = _generate_with_label(generator, noise, label).to(device)
+                fake = preprocess_for_inception(fake)
+
+                fid.update(real, real=True)
+                fid.update(fake, real=False)
+                inception.update(fake)
+                has_samples = True
+
+            if has_samples:
+                fid_scores.append(fid.compute().item())
+                is_mean, is_std = inception.compute()
+                is_means.append(float(is_mean))
+                is_stds.append(float(is_std))
+
+    if not fid_scores:
+        raise RuntimeError("Nenhuma amostra disponível para cálculo de FID/IS.")
+
+    avg_fid = float(sum(fid_scores) / len(fid_scores))
+    avg_is_mean = float(sum(is_means) / len(is_means))
+    avg_is_std = float(sum(is_stds) / len(is_stds))
+    return {"FID": avg_fid, "IS_mean": avg_is_mean, "IS_std": avg_is_std}
 
 
 def _generate_with_label(
