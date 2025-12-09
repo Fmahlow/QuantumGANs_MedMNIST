@@ -10,7 +10,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np  # operações vetoriais usadas em métricas
 import torch  # base para treino e geração das GANs
 import torch.nn as nn  # definição de modelos
-import torch.nn.functional as F  # funções auxiliares de perda
+import torch.nn.functional as F  # funções auxiliares de perda e resize
 from sklearn import metrics  # métricas clássicas do classificador
 from torchvision import models  # resnet de referência
 from torch.utils.data import DataLoader, TensorDataset  # loaders simples
@@ -387,38 +387,59 @@ def compute_fid_is(
     generator: nn.Module,
     cfg: RunConfig,
     device: torch.device,
-    num_images: int = 512,
 ) -> Tuple[float, float]:
-    """Calcula FID e IS usando torchmetrics com normalização adequada."""
+    """Replica o cálculo de FID/IS dos notebooks (pré-processamento e por rótulo)."""
 
-    from torchmetrics.image.fid import FrechetInceptionDistance  # métrica FID
-    from torchmetrics.image.inception import InceptionScore  # métrica IS
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    from torchmetrics.image.inception import InceptionScore
 
-    fid = FrechetInceptionDistance(normalize=True).to(device)  # instancia métrica
-    isc = InceptionScore(normalize=True).to(device)  # instancia IS
+    def preprocess_for_inception(imgs: torch.Tensor) -> torch.Tensor:
+        imgs = ((imgs + 1) / 2).clamp(0, 1)
+        if imgs.size(1) == 1:
+            imgs = imgs.repeat(1, 3, 1, 1)
+        imgs = F.interpolate(imgs, size=(299, 299), mode="bilinear", align_corners=False)
+        return imgs
 
-    collected = 0  # contador de amostras
-    denorm = lambda batch: ((batch + 1) / 2).clamp(0, 1)  # converte de [-1,1] para [0,1]
-    for images, _ in real_loader:  # acumula estatísticas reais
-        batch = denorm(images.to(device)).repeat(1, 3, 1, 1)  # duplica canais para 3
-        fid.update(batch, real=True)  # atualiza FID real
-        collected += batch.size(0)  # soma amostras
-        if collected >= num_images:  # limita quantidade
-            break  # sai do loop
+    generator.eval()
+    fid_scores: List[float] = []
+    is_means: List[float] = []
 
-    remaining = num_images  # controla quantas imagens sintéticas usar
-    while remaining > 0:  # gera até completar
-        current = min(cfg.batch_size, remaining)  # define tamanho do lote
-        labels = torch.randint(0, cfg.num_classes, (current,), device=device)  # labels aleatórias
-        fake = generate_synthetic(generator, labels.cpu(), cfg, device).to(device)  # gera lote
-        batch = denorm(fake).repeat(1, 3, 1, 1)  # ajusta canais e faixa
-        fid.update(batch, real=False)  # atualiza FID fake
-        isc.update(batch)  # atualiza IS
-        remaining -= current  # decrementa contador
+    with torch.no_grad():
+        for label in range(cfg.num_classes):
+            fid = FrechetInceptionDistance(feature=64, normalize=True).to(device)
+            isc = InceptionScore(normalize=True).to(device)
+            has_samples = False
 
-    fid_score = fid.compute().item()  # extrai valor
-    is_score = isc.compute()[0].item()  # primeira saída do InceptionScore
-    return fid_score, is_score  # devolve métricas
+            for real_batch, labels in real_loader:
+                mask = labels.view(-1) == label
+                if mask.sum() == 0:
+                    continue
+
+                real = preprocess_for_inception(real_batch[mask].to(device))
+                noise = torch.randn(real.size(0), cfg.latent_dim, 1, 1, device=device)
+                if isinstance(generator, CGANGenerator):
+                    synth_labels = torch.full((real.size(0),), label, device=device, dtype=torch.long)
+                    fake = generator(noise, synth_labels)
+                else:
+                    fake = generator(noise)
+                fake = preprocess_for_inception(fake)
+
+                fid.update(real, real=True)
+                fid.update(fake, real=False)
+                isc.update(fake)
+                has_samples = True
+
+            if has_samples:
+                fid_scores.append(fid.compute().item())
+                is_mean, _ = isc.compute()
+                is_means.append(is_mean.item())
+
+    if not fid_scores:
+        raise RuntimeError("Nenhum lote real encontrado para calcular FID/IS.")
+
+    avg_fid = float(sum(fid_scores) / len(fid_scores))
+    avg_is = float(sum(is_means) / len(is_means))
+    return avg_fid, avg_is
 
 
 def train_single_gan(
