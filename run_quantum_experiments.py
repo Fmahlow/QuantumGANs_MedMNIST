@@ -624,6 +624,8 @@ def train_classifier(
     for _ in range(cfg.clf_epochs):
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
+            if images.shape[-1] != 28:
+                images = F.interpolate(images, size=(28, 28), mode="bicubic", align_corners=False)
             optimizer.zero_grad()
             logits = model(images)
             loss = criterion(logits, labels)
@@ -638,6 +640,8 @@ def train_classifier(
     with torch.no_grad():
         for images, labels in test_loader:
             images = images.to(device)
+            if images.shape[-1] != 28:
+                images = F.interpolate(images, size=(28, 28), mode="bicubic", align_corners=False)
             logits = model(images)
             probs = F.softmax(logits, dim=1)[:, 1]
             preds = torch.argmax(logits, dim=1)
