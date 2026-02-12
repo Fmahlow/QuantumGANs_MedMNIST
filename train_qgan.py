@@ -9,10 +9,10 @@ from tqdm import tqdm
 import torch.nn as nn
 from utils import *
 import numpy as np
-import warnings
 import torch
 import wandb
 import yaml
+import time
 
 
 class Config:
@@ -41,8 +41,18 @@ config.generate_fields()
 autoencoder_config = Config(args.autoencoder_config)
 autoencoder = build_model_from_config(autoencoder_config.autoencoder)
 
-q_device = qml.device("default.qubit", wires=config.n_qubits)
-warnings.filterwarnings("ignore", category=UserWarning)
+def create_lightning_device(n_qubits):
+
+    try:
+        return qml.device("lightning.qubit", wires=n_qubits)
+    except Exception as exc:
+        raise RuntimeError(
+            "Pennylane Lightning backend is required but could not be initialized. "
+            "Verify that pennylane-lightning is installed and importable from the current environment."
+        ) from exc
+
+
+q_device = create_lightning_device(config.n_qubits)
 torch.set_float32_matmul_precision("high")
 seed_everything(config.random_state)
 
@@ -121,6 +131,64 @@ class QuantumGenerator(nn.Module):
         return hidden_states
 
 
+class EpochTimingCallback(l.Callback):
+
+    def __init__(self, total_batches):
+        super().__init__()
+        self.total_batches = total_batches
+        self.epoch_start_time = None
+        self.batch_start_time = None
+
+    def on_train_epoch_start(self, trainer, pl_module):
+        self.epoch_start_time = time.perf_counter()
+        self.batch_start_time = time.perf_counter()
+        if trainer.is_global_zero:
+            trainer.print(
+                f"Iniciando época {trainer.current_epoch + 1}/{trainer.max_epochs}..."
+            )
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        if self.batch_start_time is None:
+            return
+
+        batch_time = time.perf_counter() - self.batch_start_time
+        remaining_batches = self.total_batches - batch_idx - 1
+        eta_seconds = max(0.0, remaining_batches * batch_time)
+
+        metrics = {
+            "batch_time_sec": batch_time,
+            "epoch_eta_min": eta_seconds / 60,
+        }
+
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(metrics, step=trainer.global_step)
+
+        report_every = max(1, self.total_batches // 5)
+        if trainer.is_global_zero and (batch_idx + 1) % report_every == 0:
+            trainer.print(
+                f"Época {trainer.current_epoch + 1}: passo {batch_idx + 1}/"
+                f"{self.total_batches}, ~{eta_seconds / 60:.2f} min restantes"
+            )
+
+        self.batch_start_time = time.perf_counter()
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if self.epoch_start_time is None:
+            return
+
+        epoch_duration = time.perf_counter() - self.epoch_start_time
+
+        if trainer.logger is not None:
+            trainer.logger.log_metrics(
+                {"epoch_time_min": epoch_duration / 60}, step=trainer.global_step
+            )
+
+        if trainer.is_global_zero:
+            trainer.print(
+                f"Época {trainer.current_epoch + 1} finalizada em {epoch_duration / 60:.2f} min"
+            )
+
+
 dataset = DigitsDataset(path_to_csv=config.path_to_mnist, label=range(10))
 dataloader = DataLoader(
     dataset=dataset,
@@ -129,6 +197,7 @@ dataloader = DataLoader(
     pin_memory=True,
     drop_last=True,
 )
+timing_callback = EpochTimingCallback(len(dataloader))
 
 config.n_rots = 6
 generator = QuantumGenerator(
@@ -173,7 +242,7 @@ trainer = l.Trainer(
     logger=wandb_logger,
     num_sanity_val_steps=0,
     fast_dev_run=config.debug,
-    callbacks=[checkpoint_callback],
+    callbacks=[checkpoint_callback, timing_callback],
 )
 
 trainer.fit(model=gan, train_dataloaders=dataloader)
